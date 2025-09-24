@@ -36,16 +36,16 @@ The script is idempotent — you can safely re-run it to update images, refresh 
 
 1. Clone or download this repo:
 
-   ```sh
-   git clone https://github.com/scriptmgr/netbird
-   cd netbird
+```sh
+git clone https://github.com/scriptmgr/netbird
+cd netbird
 ````
 
 2. Run the installer:
 
-   ```sh
-   sudo sh ./install.sh
-   ```
+```sh
+sudo sh ./install.sh
+```
 
    > The script will install Docker (if missing), configure NetBird services, and bring them up with `docker compose`.
 
