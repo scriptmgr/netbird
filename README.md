@@ -55,11 +55,11 @@ sudo sh ./install.sh
 
 The installer creates a `docker-compose.yml` under `/opt/netbird/compose` with the following services:
 
-* `zitadel` + `zitadel-db` – Identity provider & database
-* `management` – NetBird management API
-* `dashboard` – Web UI
-* `signal` – Peer signal server
-* `coturn` – TURN/STUN relay
+- `zitadel` + `zitadel-db` – Identity provider & database
+- `management` – NetBird management API
+- `dashboard` – Web UI
+- `signal` – Peer signal server
+- `coturn` – TURN/STUN relay
 
 All services share a dedicated Docker network `nb_net`.
 
@@ -68,17 +68,17 @@ All services share a dedicated Docker network `nb_net`.
 
 All services are **internal**. You must publish them via a reverse proxy (Nginx, Traefik, Caddy, etc.). Example mapping:
 
-* External `https://your-domain:64453` → NetBird Dashboard (`dashboard`)
-* External `https://your-domain:64453` → NetBird Management API (`management`)
-* External `https://your-domain:64453` → ZITADEL (`zitadel`)
+- External `https://your-domain:64453` → NetBird Dashboard (`dashboard`)
+- External `https://your-domain:64453` → NetBird Management API (`management`)
+- External `https://your-domain:64453` → ZITADEL (`zitadel`)
 
 TURN ports (`udp/3478`, `udp/49152-49252`) must be open between peers and the server.
 
 
 ## Admin Account
 
-* Username: `administrator@<ORG>.<DOMAIN>`
-* Password: stored in `/opt/netbird/secrets/admin_password`
+- Username: `administrator@<ORG>.<DOMAIN>`
+- Password: stored in `/opt/netbird/secrets/admin_password`
 
 On first run, the user is created in ZITADEL. On subsequent runs, the password is reset to match the file.
 
@@ -87,10 +87,10 @@ On first run, the user is created in ZITADEL. On subsequent runs, the password i
 
 Key config files live under `/opt/netbird/etc`:
 
-* `zitadel.env` – bootstrap env for IdP
-* `netbird.env` – NetBird environment config
-* `management.json` – Management OIDC settings
-* `zitadel-secrets.yaml` – IdP setup secrets
+- `zitadel.env` – bootstrap env for IdP
+- `netbird.env` – NetBird environment config
+- `management.json` – Management OIDC settings
+- `zitadel-secrets.yaml` – IdP setup secrets
 
 
 ## Updating
@@ -103,16 +103,16 @@ sudo sh ./install.sh
 
 The script will:
 
-* Pull latest container images
-* Preserve volumes and secrets
-* Restart services with updated configs
+- Pull latest container images
+- Preserve volumes and secrets
+- Restart services with updated configs
 
 
 ## Logs & Data
 
-* Logs: `/opt/netbird/log`
-* Secrets: `/opt/netbird/secrets`
-* Data volumes: `/opt/netbird/data`
+- Logs: `/opt/netbird/log`
+- Secrets: `/opt/netbird/secrets`
+- Data volumes: `/opt/netbird/data`
 
 
 ## Next Steps
@@ -135,8 +135,8 @@ The script will:
 
 ## Notes
 
-* The installer does **not** expose services directly on the host. Always use a reverse proxy with TLS.
-* If ZITADEL CLI syntax changes, you may need to adjust admin password reset commands manually inside the container.
+- The installer does **not** expose services directly on the host. Always use a reverse proxy with TLS.
+- If ZITADEL CLI syntax changes, you may need to adjust admin password reset commands manually inside the container.
 
 
 ## License

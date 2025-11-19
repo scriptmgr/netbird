@@ -11,34 +11,37 @@ set -eu
 #######################################
 # Helpers
 #######################################
-say(){ printf '%s\n' "$*"; }
-die(){ say "ERROR: $*" >&2; exit 1; }
-need_cmd(){ command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
-as_root(){ [ "$(id -u)" -eq 0 ] || die "please run as root (sudo sh ./install.sh)"; }
+say() { printf '%s\n' "$*"; }
+die() {
+	say "ERROR: $*" >&2
+	exit 1
+}
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+as_root() { [ "$(id -u)" -eq 0 ] || die "please run as root (sudo sh ./install.sh)"; }
 
-randpass(){
-  # 24-char base64-ish without slashes/plus for convenience
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -base64 32 | tr -d '\n' | tr -d '/+' | cut -c1-24
-  else
-    # fallback
-    dd if=/dev/urandom bs=48 count=1 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-24
-  fi
+randpass() {
+	# 24-char base64-ish without slashes/plus for convenience
+	if command -v openssl >/dev/null 2>&1; then
+		openssl rand -base64 32 | tr -d '\n' | tr -d '/+' | cut -c1-24
+	else
+		# fallback
+		dd if=/dev/urandom bs=48 count=1 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-24
+	fi
 }
 
 #######################################
 # Config defaults (override via env before running)
 #######################################
-: "${NB_ROOT:=/opt/netbird}"
-: "${NB_DOMAIN:=localhost}"               # external domain for your reverse proxy (e.g., vpn.example.com)
-: "${NB_ORG:=netbird}"                    # org slug used in ZITADEL login name suffix
-: "${NB_EXTERNAL_PORT:=64453}"            # external port exposed by your reverse proxy
-: "${NB_EMAIL_SMTP_HOST:=127.0.0.1}"      # host's MTA
-: "${NB_EMAIL_SMTP_PORT:=25}"             # host's MTA port
-: "${NB_EMAIL_FROM:=netbird@$NB_DOMAIN}"  # from address for transactional emails
-: "${NB_TIMEZONE:=UTC}"                   # TZ for containers
-: "${NB_DOCKER_NETWORK:=nb_net}"
-
+: "${NB_ROOT:=/opt/netbird}"                   # root of your NetBird self-hosted stack
+: "${NB_DOMAIN:=vpn2me.us}"                    # external domain for your reverse proxy (e.g., vpn.example.com)
+: "${NB_ORG:=netbird}"                         # org slug used in ZITADEL login name suffix
+: "${NB_EXTERNAL_PORT:=64453}"                 # external port exposed by your reverse proxy
+: "${NB_EMAIL_SMTP_HOST:=127.0.0.1}"           # host's MTA
+: "${NB_EMAIL_SMTP_PORT:=25}"                  # host's MTA port
+: "${NB_EMAIL_FROM_USER:=no-reply@$NB_DOMAIN}" # from address for transactional emails
+: "${NB_TIMEZONE:=America/New_York}"           # TZ for containers
+: "${NB_DOCKER_NETWORK:=netbird}"              # docker network name for the stack
+: "${NB_EMAIL_FROM_NAME:=CasjaysDev NetBird}"  # smtp email "from" name
 # Derived
 NB_ETC="$NB_ROOT/etc"
 NB_DATA="$NB_ROOT/data"
@@ -48,9 +51,9 @@ NB_STATE="$NB_ROOT/state"
 NB_LOG="$NB_ROOT/log"
 
 ZITADEL_DATA="$NB_DATA/zitadel"
-ZITA_DB_DATA="$NB_DATA/zitadel-postgres"
+ZITA_DB_DATA="$NB_DATA/postgres"
 TURN_DATA="$NB_DATA/turn"
-MGMT_DATA="$NB_DATA/management"        # includes sqlite store if used
+MGMT_DATA="$NB_DATA/management" # includes sqlite store if used
 SIGNAL_DATA="$NB_DATA/signal"
 DASH_DATA="$NB_DATA/dashboard"
 
@@ -80,8 +83,7 @@ need_cmd grep
 need_cmd printf
 need_cmd uname
 
-mkdir -p "$NB_ETC" "$NB_DATA" "$NB_SECRETS" "$NB_COMPOSE" "$NB_STATE" "$NB_LOG" \
-         "$ZITADEL_DATA" "$ZITA_DB_DATA" "$TURN_DATA" "$MGMT_DATA" "$SIGNAL_DATA" "$DASH_DATA"
+mkdir -p "$NB_ETC" "$NB_DATA" "$NB_SECRETS" "$NB_COMPOSE" "$NB_STATE" "$NB_LOG" "$ZITADEL_DATA" "$ZITA_DB_DATA" "$TURN_DATA" "$MGMT_DATA" "$SIGNAL_DATA" "$DASH_DATA"
 
 # set sane perms on secrets
 chmod 700 "$NB_SECRETS"
@@ -89,119 +91,123 @@ chmod 700 "$NB_SECRETS"
 #######################################
 # Install/Upgrade Docker Engine (official repos)
 #######################################
-install_docker(){
-  if command -v docker >/dev/null 2>&1; then
-    say "Docker already present. Ensuring Compose plugin is available..."
-  fi
+install_docker() {
+	if command -v docker >/dev/null 2>&1; then
+		say "Docker already present. Ensuring Compose plugin is available..."
+	fi
 
-  OS="$(uname -s)"
-  case "$OS" in
-    Linux)
-      # detect distro
-      if [ -f /etc/os-release ]; then
-        . /etc/os-release
-      else
-        ID=unknown
-      fi
+	OS="$(uname -s)"
+	case "$OS" in
+	Linux)
+		# detect distro
+		if [ -f /etc/os-release ]; then
+			. /etc/os-release
+		else
+			ID=unknown
+		fi
 
-      case "$ID" in
-        ubuntu|debian|raspbian)
-          need_cmd apt-get
-          # remove distro docker.io if present
-          if dpkg -l | grep -q '^ii\s\+docker\.io'; then
-            say "Removing docker.io package to avoid conflicts..."
-            apt-get remove -y docker.io || true
-          fi
-          apt-get update -y
-          need_cmd gpg
-          install -m 0755 -d /etc/apt/keyrings
-          if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
-            curl -fsSL https://download.docker.com/linux/"$ID"/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-            chmod a+r /etc/apt/keyrings/docker.gpg
-          fi
-          echo \
-"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$ID \
-$(. /etc/os-release; echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
-          apt-get update -y
-          apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-          ;;
-        fedora)
-          need_cmd dnf
-          dnf -y install dnf-plugins-core
-          dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
-          dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-          systemctl enable --now docker
-          ;;
-        centos|rhel|rocky|almalinux|ol)
-          PM=dnf; command -v yum >/dev/null 2>&1 && PM=yum
-          $PM -y install yum-utils
-          $PM config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-          $PM -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-          systemctl enable --now docker
-          ;;
-        opensuse*|sles)
-          need_cmd zypper
-          zypper refresh
-          zypper -n install docker docker-compose
-          systemctl enable --now docker
-          ;;
-        arch|manjaro|endeavouros|arcolinux)
-          need_cmd pacman
-          pacman -Sy --noconfirm docker docker-compose
-          systemctl enable --now docker
-          ;;
-        *)
-          say "Unknown distro '$ID'. Attempting to use existing Docker if available."
-          ;;
-      esac
-      ;;
-    *)
-      die "Unsupported OS: $OS (Linux required for server components)"
-      ;;
-  esac
+		case "$ID" in
+		ubuntu | debian | raspbian)
+			need_cmd apt-get
+			# remove distro docker.io if present
+			if dpkg -l | grep -q '^ii\s\+docker\.io'; then
+				say "Removing docker.io package to avoid conflicts..."
+				apt-get remove -y docker.io || true
+			fi
+			apt-get update -y
+			need_cmd gpg
+			install -m 0755 -d /etc/apt/keyrings
+			if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+				curl -fsSL https://download.docker.com/linux/"$ID"/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+				chmod a+r /etc/apt/keyrings/docker.gpg
+			fi
+			echo \
+				"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$ID \
+$(
+					. /etc/os-release
+					echo "$VERSION_CODENAME"
+				) stable" >/etc/apt/sources.list.d/docker.list
+			apt-get update -y
+			apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+			;;
+		fedora)
+			need_cmd dnf
+			dnf -y install dnf-plugins-core
+			dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+			dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+			systemctl enable --now docker
+			;;
+		centos | rhel | rocky | almalinux | ol)
+			PM=dnf
+			command -v yum >/dev/null 2>&1 && PM=yum
+			$PM -y install yum-utils
+			$PM config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+			$PM -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+			systemctl enable --now docker
+			;;
+		opensuse* | sles)
+			need_cmd zypper
+			zypper refresh
+			zypper -n install docker docker-compose
+			systemctl enable --now docker
+			;;
+		arch | manjaro | endeavouros | arcolinux)
+			need_cmd pacman
+			pacman -Sy --noconfirm docker docker-compose
+			systemctl enable --now docker
+			;;
+		*)
+			say "Unknown distro '$ID'. Attempting to use existing Docker if available."
+			;;
+		esac
+		;;
+	*)
+		die "Unsupported OS: $OS (Linux required for server components)"
+		;;
+	esac
 
-  command -v docker >/dev/null 2>&1 || die "Docker not installed"
-  # prefer plugin: docker compose
-  docker compose version >/dev/null 2>&1 || die "Docker Compose plugin not found (docker compose)."
-  systemctl is-active docker >/dev/null 2>&1 || systemctl start docker || true
+	command -v docker >/dev/null 2>&1 || die "Docker not installed"
+	# prefer plugin: docker compose
+	docker compose version >/dev/null 2>&1 || die "Docker Compose plugin not found (docker compose)."
+	systemctl is-active docker >/dev/null 2>&1 || systemctl start docker || true
 }
 
 #######################################
 # Generate secrets and env
 #######################################
-ensure_secret(){
-  file="$1"
-  if [ ! -s "$file" ]; then
-    umask 077
-    printf '%s' "$(randpass)" > "$file"
-    say "Generated secret: $file"
-  fi
+ensure_secret() {
+	file="$1"
+	if [ ! -s "$file" ]; then
+		umask 077
+		printf '%s' "$(randpass)" >"$file"
+		say "Generated secret: $file"
+	fi
 }
 
 # Admin password
-ensure_admin_password(){
-  if [ ! -s "$ADMIN_PASS_FILE" ]; then
-    umask 077
-    printf '%s\n' "$(randpass)" > "$ADMIN_PASS_FILE"
-    say "Generated admin password at $ADMIN_PASS_FILE"
-  fi
+ensure_admin_password() {
+	if [ ! -s "$ADMIN_PASS_FILE" ]; then
+		umask 077
+		printf '%s\n' "$(randpass)" >"$ADMIN_PASS_FILE"
+		say "Generated admin password at $ADMIN_PASS_FILE"
+	fi
 }
 
 # ZITADEL master key (required)
-ensure_master_key(){
-  if [ ! -s "$MASTER_KEY_FILE" ]; then
-    umask 077
-    # 32 chars
-    printf '%s\n' "$(randpass)$(randpass)" | cut -c1-32 > "$MASTER_KEY_FILE"
-    say "Generated ZITADEL master key at $MASTER_KEY_FILE"
-  fi
+ensure_master_key() {
+	if [ ! -s "$MASTER_KEY_FILE" ]; then
+		umask 077
+		# 32 chars
+		printf '%s\n' "$(randpass)$(randpass)" | cut -c1-32 >"$MASTER_KEY_FILE"
+		say "Generated ZITADEL master key at $MASTER_KEY_FILE"
+	fi
 }
 
 #######################################
 # Compose files and configs
 #######################################
-write_zitadel_env(){
-  cat > "$ZITADEL_ENV_FILE" <<EOF
+write_zitadel_env() {
+	cat >"$ZITADEL_ENV_FILE" <<EOF
 # Autogenerated by install.sh
 TZ=$NB_TIMEZONE
 
@@ -211,27 +217,26 @@ POSTGRES_PASSWORD=$(randpass)
 POSTGRES_DB=zitadel
 
 # ZITADEL first instance bootstrap (admin user & org)
-ZITADEL_FIRSTINSTANCE_ORG_NAME=$NB_ORG
-ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME=$ADMIN_USER_LOCAL
-ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD=$(cat "$ADMIN_PASS_FILE")
-ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL=admin@$NB_DOMAIN
-ZITADEL_EXTERNALDOMAIN=$NB_DOMAIN
-# External secure scheme assumed at the proxy; Zitadel will run internal over http
+ZITADEL_FIRSTINSTANCE_ORG_NAME="$NB_ORG"
+ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME="$ADMIN_USER_LOCAL"
+ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD="$(cat "$ADMIN_PASS_FILE")"
+ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL="admin@$NB_DOMAIN"
+ZITADEL_EXTERNALDOMAIN="$NB_DOMAIN"
 ZITADEL_EXTERNALSECURE=true
 
 # SMTP (host MTA)
-ZITADEL_NOTIFICATIONS_SMTP_HOST=$NB_EMAIL_SMTP_HOST
-ZITADEL_NOTIFICATIONS_SMTP_PORT=$NB_EMAIL_SMTP_PORT
-ZITADEL_NOTIFICATIONS_SMTP_FROM=$NB_EMAIL_FROM
 ZITADEL_NOTIFICATIONS_SMTPTLS=false
-ZITADEL_NOTIFICATIONS_SMTPSENDERNAME=NetBird IdP
+ZITADEL_NOTIFICATIONS_SMTP_FROM="$NB_EMAIL_FROM_USER"
+ZITADEL_NOTIFICATIONS_SMTP_PORT="$NB_EMAIL_SMTP_PORT"
+ZITADEL_NOTIFICATIONS_SMTP_HOST="$NB_EMAIL_SMTP_HOST"
+ZITADEL_NOTIFICATIONS_SMTPSENDERNAME="$NB_EMAIL_FROM_NAME"
 EOF
 }
 
-write_netbird_env(){
-  # OIDC endpoints are derived from ZITADEL external domain
-  Z_ISSUER="https://$NB_DOMAIN"
-  cat > "$NETBIRD_ENV_FILE" <<EOF
+write_netbird_env() {
+	# OIDC endpoints are derived from ZITADEL external domain
+	Z_ISSUER="https://$NB_DOMAIN"
+	cat >"$NETBIRD_ENV_FILE" <<EOF
 # Autogenerated by install.sh
 TZ=$NB_TIMEZONE
 
@@ -244,16 +249,16 @@ NETBIRD_AUTH_OIDC_CONFIG_URL=$Z_ISSUER/.well-known/openid-configuration
 # NETBIRD_AUTH_CLIENT_SECRET=
 
 # E-mail (host MTA)
-NETBIRD_EMAIL_SMTP_HOST=$NB_EMAIL_SMTP_HOST
-NETBIRD_EMAIL_SMTP_PORT=$NB_EMAIL_SMTP_PORT
-NETBIRD_EMAIL_FROM=$NB_EMAIL_FROM
+NETBIRD_EMAIL_SMTP_HOST="$NB_EMAIL_SMTP_HOST
+NETBIRD_EMAIL_SMTP_PORT="$NB_EMAIL_SMTP_PORT"
+NETBIRD_EMAIL_FROM="$NB_EMAIL_FROM_USER"
 EOF
 }
 
-write_management_json(){
-  # Minimal OIDC wiring; for advanced cases, customize later.
-  Z_ISSUER="https://$NB_DOMAIN"
-  cat > "$MGMT_JSON_FILE" <<'JSON'
+write_management_json() {
+	# Minimal OIDC wiring; for advanced cases, customize later.
+	Z_ISSUER="https://$NB_DOMAIN"
+	cat >"$MGMT_JSON_FILE" <<'JSON'
 {
   "HttpConfig": {
     "IdpSignKeyRefreshEnabled": true,
@@ -278,17 +283,17 @@ write_management_json(){
   }
 }
 JSON
-  # perform basic substitutions with placeholders; user may refine later
-  sed -i \
-    -e "s#__OIDC_CONFIG__#${Z_ISSUER}/.well-known/openid-configuration#g" \
-    -e "s#__ISSUER__#${Z_ISSUER}#g" \
-    -e "s#__CLIENT_ID__##g" \
-    -e "s#__CLIENT_SECRET__##g" \
-    "$MGMT_JSON_FILE"
+	# perform basic substitutions with placeholders; user may refine later
+	sed -i \
+		-e "s#__OIDC_CONFIG__#${Z_ISSUER}/.well-known/openid-configuration#g" \
+		-e "s#__ISSUER__#${Z_ISSUER}#g" \
+		-e "s#__CLIENT_ID__##g" \
+		-e "s#__CLIENT_SECRET__##g" \
+		"$MGMT_JSON_FILE"
 }
 
-write_compose(){
-  cat > "$DC_FILE" <<EOF
+write_compose() {
+	cat >"$DC_FILE" <<EOF
 # Autogenerated by install.sh — NetBird self-hosted stack
 name: netbird
 services:
@@ -392,9 +397,9 @@ secrets:
 EOF
 }
 
-write_zitadel_config_yaml(){
-  # minimal bootstrap config for start-from-setup; DB creds from env
-  cat > "$NB_ETC/zitadel-secrets.yaml" <<EOF
+write_zitadel_config_yaml() {
+	# minimal bootstrap config for start-from-setup; DB creds from env
+	cat >"$NB_ETC/zitadel-secrets.yaml" <<EOF
 Database:
   postgres:
     Host: $ZITA_DB_SVC
@@ -433,30 +438,29 @@ EOF
 #######################################
 # Admin ensure/reset (Zitadel)
 #######################################
-ensure_admin_user(){
-  # We attempt a best-effort password (re)set for the human admin.
-  # On first boot, ZITADEL will create the user via FirstInstance config.
-  # On subsequent runs (existing DB), we try to change the password.
-  # CLI inside container:
-  #   zitadel users human change-password --org <org> --login-name <user@org.domain> --password <new>
-  # CLI flags vary across versions; if it fails, we just print the next steps.
+ensure_admin_user() {
+	# We attempt a best-effort password (re)set for the human admin.
+	# On first boot, ZITADEL will create the user via FirstInstance config.
+	# On subsequent runs (existing DB), we try to change the password.
+	# CLI inside container:
+	#   zitadel users human change-password --org <org> --login-name <user@org.domain> --password <new>
+	# CLI flags vary across versions; if it fails, we just print the next steps.
 
-  login_name="$ADMIN_USER_LOCAL@$NB_ORG.$NB_DOMAIN"
-  new_pass="$(cat "$ADMIN_PASS_FILE")"
+	login_name="$ADMIN_USER_LOCAL@$NB_ORG.$NB_DOMAIN"
+	new_pass="$(cat "$ADMIN_PASS_FILE")"
 
-  if docker compose -f "$DC_FILE" ps "$ZITADEL_SVC" >/dev/null 2>&1; then
-    say "Attempting to (re)set admin password in ZITADEL for $login_name ..."
-    if docker compose -f "$DC_FILE" exec -T "$ZITADEL_SVC" /bin/sh -c \
-      "zitadel users human change-password --login-name '$login_name' --password '$new_pass'" 2>"$NB_LOG/zitadel_chpass.err"
-    then
-      say "Admin password ensured in ZITADEL."
-    else
-      say "Could not change admin password automatically (CLI syntax may differ)."
-      say "Manual step (inside zitadel container):"
-      say "  zitadel users human change-password --login-name '$login_name' --password '$(cat "$ADMIN_PASS_FILE")'"
-      say "See $NB_LOG/zitadel_chpass.err for details."
-    fi
-  fi
+	if docker compose -f "$DC_FILE" ps "$ZITADEL_SVC" >/dev/null 2>&1; then
+		say "Attempting to (re)set admin password in ZITADEL for $login_name ..."
+		if docker compose -f "$DC_FILE" exec -T "$ZITADEL_SVC" /bin/sh -c \
+			"zitadel users human change-password --login-name '$login_name' --password '$new_pass'" 2>"$NB_LOG/zitadel_chpass.err"; then
+			say "Admin password ensured in ZITADEL."
+		else
+			say "Could not change admin password automatically (CLI syntax may differ)."
+			say "Manual step (inside zitadel container):"
+			say "  zitadel users human change-password --login-name '$login_name' --password '$(cat "$ADMIN_PASS_FILE")'"
+			say "See $NB_LOG/zitadel_chpass.err for details."
+		fi
+	fi
 }
 
 #######################################
@@ -479,11 +483,15 @@ export COMPOSE_PROJECT_NAME=netbird
 docker network inspect "$NB_DOCKER_NETWORK" >/dev/null 2>&1 || docker network create "$NB_DOCKER_NETWORK" >/dev/null
 
 # Pull/update images and start
-( cd "$NB_COMPOSE"
-  # shellcheck disable=SC2046
-  set -a; . "$ZITADEL_ENV_FILE"; . "$NETBIRD_ENV_FILE"; set +a
-  docker compose pull
-  docker compose up -d
+(
+	cd "$NB_COMPOSE"
+	# shellcheck disable=SC2046
+	set -a
+	. "$ZITADEL_ENV_FILE"
+	. "$NETBIRD_ENV_FILE"
+	set +a
+	docker compose pull
+	docker compose up -d
 )
 
 # Best-effort admin ensure/reset
@@ -506,7 +514,7 @@ Admin account:
   - Stored at: $ADMIN_PASS_FILE
 
 SMTP:
-  - Using host MTA at ${NB_EMAIL_SMTP_HOST}:${NB_EMAIL_SMTP_PORT}, from=${NB_EMAIL_FROM}
+  - Using host MTA at ${NB_EMAIL_SMTP_HOST}:${NB_EMAIL_SMTP_PORT}, from=${NB_EMAIL_FROM_USER}
 
 Next steps:
   1) Point your reverse proxy at the internal services above; expose EXTERNALLY on :${NB_EXTERNAL_PORT}.
