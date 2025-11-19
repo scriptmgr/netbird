@@ -310,7 +310,7 @@ services:
     networks: [$NB_DOCKER_NETWORK]
 
   $ZITADEL_SVC:
-    image: ghcr.io/zitadel/zitadel:latest
+    image: ghcr.io/zitadel/zitadel:v2.64.1
     depends_on: [$ZITA_DB_SVC]
     restart: unless-stopped
     environment:
