@@ -348,7 +348,7 @@ services:
       - $TURN_DATA:/var/lib/coturn
 
   $MGMT_SVC:
-    image: ghcr.io/netbirdio/management:latest
+    image: docker.io/netbirdio/management:latest
     restart: unless-stopped
     environment:
       - TZ=\${TZ}
@@ -368,7 +368,7 @@ services:
     # port 8080/4433 stay internal; put your proxy in front
 
   $DASH_SVC:
-    image: ghcr.io/netbirdio/dashboard:latest
+    image: docker.io/netbirdio/dashboard:latest
     restart: unless-stopped
     environment:
       - TZ=\${TZ}
@@ -378,7 +378,7 @@ services:
     # internal HTTP (proxy will forward external :64453 -> this service)
 
   $SIG_SVC:
-    image: ghcr.io/netbirdio/signal:latest
+    image: docker.io/netbirdio/signal:latest
     restart: unless-stopped
     environment:
       - TZ=\${TZ}
