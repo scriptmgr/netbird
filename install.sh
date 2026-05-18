@@ -29,8 +29,8 @@ randpass() {
 		base=$(dd if=/dev/urandom bs=64 count=1 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-"$base_len")
 	fi
 	rand_byte=$(dd if=/dev/urandom bs=1 count=1 2>/dev/null | od -An -tu1 | tr -dc '0-9')
-	symbols='!@#%*_-'
-	sym=$(printf '%s' "$symbols" | cut -c"$(( (rand_byte % 7) + 1 ))")
+	symbols='!@#*_-'
+	sym=$(printf '%s' "$symbols" | cut -c"$(( (rand_byte % 6) + 1 ))")
 	printf '%s%s\n' "$base" "$sym"
 }
 
@@ -575,6 +575,11 @@ services:
       $ZITADEL_SVC:
         condition: service_started
     restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -c
+      - until timeout 3 bash -c "exec 3<>/dev/tcp/$NB_DOMAIN/8080" 2>/dev/null; do printf 'waiting for ZITADEL...\n'; sleep 5; done; exec /go/bin/netbird-mgmt management "\$@"
+      - --
     command:
       - --port
       - "8080"
