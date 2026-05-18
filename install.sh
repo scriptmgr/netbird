@@ -19,11 +19,19 @@ as_root() { [ "$(id -u)" -eq 0 ] || die "please run as root (sudo sh ./install.s
 
 randpass() {
 	length="${1:-24}"
+	# Generate alphanumeric base one char shorter, then append a symbol.
+	# ZITADEL's default complexity policy requires upper, lower, digit, and symbol.
+	# Symbols chosen are safe in double-quoted env values and YAML scalars.
+	base_len="$((length - 1))"
 	if have_cmd openssl; then
-		openssl rand -base64 48 | tr -d '\n' | tr -d '/+=' | cut -c1-"$length"
+		base=$(openssl rand -base64 48 | tr -d '\n' | tr -d '/+=' | cut -c1-"$base_len")
 	else
-		dd if=/dev/urandom bs=64 count=1 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-"$length"
+		base=$(dd if=/dev/urandom bs=64 count=1 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-"$base_len")
 	fi
+	rand_byte=$(dd if=/dev/urandom bs=1 count=1 2>/dev/null | od -An -tu1 | tr -dc '0-9')
+	symbols='!@#%*_-'
+	sym=$(printf '%s' "$symbols" | cut -c"$(( (rand_byte % 7) + 1 ))")
+	printf '%s%s\n' "$base" "$sym"
 }
 
 read_value() {
@@ -42,6 +50,20 @@ ensure_secret_file() {
 			printf '%s\n' "$(randpass "$length")" >"$file"
 		)
 		say "Generated $label at $file"
+	fi
+}
+
+# DataStoreEncryptionKey must be standard base64 of exactly 32 random bytes
+# (AES-256 key). randpass() produces an arbitrary string that is not valid
+# base64 so it cannot be used here.
+ensure_datastore_key() {
+	if [ ! -s "$DATASTORE_KEY_FILE" ]; then
+		need_cmd openssl
+		(
+			umask 077
+			openssl rand -base64 32 >"$DATASTORE_KEY_FILE"
+		)
+		say "Generated NetBird datastore key at $DATASTORE_KEY_FILE"
 	fi
 }
 
@@ -91,12 +113,18 @@ firewall_open_port() {
 wait_for_http() {
 	url="$1"
 	label="$2"
+	# Optional: host header override (for ZITADEL instance lookup by domain name)
+	host_hdr="${3:-}"
 	attempt=1
 	while [ "$attempt" -le 60 ]; do
-		http_code="$(curl -ksS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || printf '000')"
-		if [ "$http_code" != "000" ]; then
-			return 0
+		if [ -n "$host_hdr" ]; then
+			http_code="$(curl -ksS -H "Host: $host_hdr" -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || printf '000')"
+		else
+			http_code="$(curl -ksS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || printf '000')"
 		fi
+		case "$http_code" in
+			2*) return 0 ;;
+		esac
 		sleep 2
 		attempt=$((attempt + 1))
 	done
@@ -147,6 +175,11 @@ os_id() {
 : "${NB_TURN_PORT:=3478}"
 : "${NB_TURN_MIN_PORT:=49152}"
 : "${NB_TURN_MAX_PORT:=49252}"
+: "${NB_AUTH_CLIENT_ID:=replace-me-client-id}"
+: "${NB_AUTH_CLIENT_SECRET:=replace-me-client-secret}"
+: "${NB_IDP_MGMT_CLIENT_ID:=replace-me-management-client-id}"
+: "${NB_IDP_MGMT_CLIENT_SECRET:=replace-me-management-client-secret}"
+: "${NB_AUTH_SUPPORTED_SCOPES:=openid profile email offline_access}"
 
 NB_ETC="$NB_ROOT/etc"
 NB_DATA="$NB_ROOT/data"
@@ -216,7 +249,7 @@ install_docker() {
 		case "$linux_id" in
 		ubuntu | debian | raspbian)
 			need_cmd apt-get
-			if dpkg -l | grep -q '^ii\s\+docker\.io'; then
+			if dpkg -l | grep -qE '^ii[[:space:]]+docker\.io'; then
 				say "Removing docker.io package to avoid conflicts..."
 				apt-get remove -y docker.io
 			fi
@@ -306,7 +339,7 @@ ensure_runtime_secrets() {
 	ensure_secret_file "$POSTGRES_PASS_FILE" 32 "Postgres password"
 	ensure_secret_file "$ZITADEL_DB_PASS_FILE" 32 "ZITADEL database password"
 	ensure_secret_file "$TURN_PASS_FILE" 32 "TURN password"
-	ensure_secret_file "$DATASTORE_KEY_FILE" 32 "NetBird datastore key"
+	ensure_datastore_key
 	ensure_value_file "$TURN_USER_FILE" "$TURN_USER_LOCAL" "TURN username"
 }
 
@@ -357,11 +390,11 @@ TZ="$NB_TIMEZONE"
 NB_AUTH_ISSUER=https://$NB_DOMAIN:$NB_EXTERNAL_PORT
 NB_AUTH_OIDC_CONFIGURATION_ENDPOINT=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/.well-known/openid-configuration
 NB_AUTH_TOKEN_ENDPOINT=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/oauth/v2/token
-NB_AUTH_CLIENT_ID=replace-me-client-id
-NB_AUTH_CLIENT_SECRET=replace-me-client-secret
-NB_IDP_MGMT_CLIENT_ID=replace-me-management-client-id
-NB_IDP_MGMT_CLIENT_SECRET=replace-me-management-client-secret
-NB_AUTH_SUPPORTED_SCOPES="openid profile email offline_access"
+NB_AUTH_CLIENT_ID=$NB_AUTH_CLIENT_ID
+NB_AUTH_CLIENT_SECRET=$NB_AUTH_CLIENT_SECRET
+NB_IDP_MGMT_CLIENT_ID=$NB_IDP_MGMT_CLIENT_ID
+NB_IDP_MGMT_CLIENT_SECRET=$NB_IDP_MGMT_CLIENT_SECRET
+NB_AUTH_SUPPORTED_SCOPES="$NB_AUTH_SUPPORTED_SCOPES"
 
 NETBIRD_EMAIL_SMTP_HOST="$NB_EMAIL_SMTP_HOST"
 NETBIRD_EMAIL_SMTP_PORT="$NB_EMAIL_SMTP_PORT"
@@ -446,21 +479,20 @@ write_management_json() {
     "Address": "0.0.0.0:8080",
     "AuthIssuer": "$NB_AUTH_ISSUER",
     "AuthAudience": "$NB_AUTH_CLIENT_ID",
-    "AuthKeysLocation": "http://$ZITADEL_SVC:8080/keys",
     "IdpSignKeyRefreshEnabled": true,
-    "OIDCConfigEndpoint": "http://$ZITADEL_SVC:8080/.well-known/openid-configuration"
+    "OIDCConfigEndpoint": "http://$NB_DOMAIN:8080/.well-known/openid-configuration"
   },
   "IdpManagerConfig": {
     "ManagerType": "zitadel",
     "ClientConfig": {
       "Issuer": "$NB_AUTH_ISSUER",
-      "TokenEndpoint": "http://$ZITADEL_SVC:8080/oauth/v2/token",
+      "TokenEndpoint": "http://$NB_DOMAIN:8080/oauth/v2/token",
       "ClientID": "$NB_IDP_MGMT_CLIENT_ID",
       "ClientSecret": "$NB_IDP_MGMT_CLIENT_SECRET",
       "GrantType": "client_credentials"
     },
     "ExtraConfig": {
-      "ManagementEndpoint": "http://$ZITADEL_SVC:8080/management/v1"
+      "ManagementEndpoint": "http://$NB_DOMAIN:8080/management/v1"
     }
   },
   "PKCEAuthorizationFlow": {
@@ -519,7 +551,10 @@ services:
       - $ZITADEL_DATA:/zitadel:$rw_opts
     ports:
       - 127.0.0.1:$NB_ZITADEL_BACKEND_PORT:8080
-    networks: [$NB_DOCKER_NETWORK]
+    networks:
+      $NB_DOCKER_NETWORK:
+        aliases:
+          - $NB_DOMAIN
 
   $TURN_SVC:
     image: docker.io/coturn/coturn:latest
@@ -534,10 +569,19 @@ services:
 
   $MGMT_SVC:
     image: docker.io/netbirdio/management:latest
+    depends_on:
+      $ZITA_DB_SVC:
+        condition: service_healthy
+      $ZITADEL_SVC:
+        condition: service_started
     restart: unless-stopped
     command:
       - --port
       - "8080"
+      - --config
+      - /etc/netbird/management.json
+      - --datadir
+      - /var/lib/netbird
       - --log-file
       - console
       - --log-level
@@ -548,12 +592,6 @@ services:
       - --idp-sign-key-refresh-enabled
     environment:
       - TZ=$NB_TIMEZONE
-      - NB_DATA_DIR=/var/lib/netbird
-      - NB_MANAGEMENT_IDP=oidc
-      - NB_MANAGEMENT_IDP_MGMT_JSON=/etc/netbird/management.json
-      - NB_EMAIL_SMTP_HOST=$NB_EMAIL_SMTP_HOST
-      - NB_EMAIL_SMTP_PORT=$NB_EMAIL_SMTP_PORT
-      - NB_EMAIL_SENDER=$NB_EMAIL_FROM_USER
     volumes:
       - $MGMT_DATA:/var/lib/netbird:$rw_opts
       - $MGMT_JSON_FILE:/etc/netbird/management.json:$ro_opts
@@ -605,27 +643,36 @@ validate_compose_definition() {
 }
 
 validate_running_services() {
-	running_services="$(docker compose -f "$DC_FILE" ps --services --status running)"
+	say "Waiting for all services to reach running state (up to 5 minutes)..."
+	attempt=1
+	while [ "$attempt" -le 60 ]; do
+		all_running=1
+		running_services="$(docker compose -f "$DC_FILE" ps --services --status running 2>/dev/null)"
+		for service in "$ZITA_DB_SVC" "$ZITADEL_SVC" "$TURN_SVC" "$MGMT_SVC" "$DASH_SVC" "$SIG_SVC"; do
+			if ! printf '%s\n' "$running_services" | grep -qx "$service"; then
+				all_running=0
+				break
+			fi
+		done
+		[ "$all_running" -eq 1 ] && return 0
+		sleep 5
+		attempt=$((attempt + 1))
+	done
+	# Final pass — report which service(s) failed
+	running_services="$(docker compose -f "$DC_FILE" ps --services --status running 2>/dev/null)"
 	for service in "$ZITA_DB_SVC" "$ZITADEL_SVC" "$TURN_SVC" "$MGMT_SVC" "$DASH_SVC" "$SIG_SVC"; do
 		printf '%s\n' "$running_services" | grep -qx "$service" || die "service did not reach running state: $service"
 	done
 }
 
 ensure_admin_user() {
-	login_name="$ADMIN_USER_LOCAL@$NB_ORG.$NB_DOMAIN"
-	new_pass="$(read_value "$ADMIN_PASS_FILE")"
-
-	wait_for_container_exec "$ZITADEL_SVC"
-	say "Attempting to ensure ZITADEL admin password for $login_name ..."
-
-	if docker compose -f "$DC_FILE" exec -T "$ZITADEL_SVC" /bin/sh -c "zitadel users human change-password --login-name '$login_name' --password '$new_pass'" 2>"$NB_LOG/zitadel_chpass.err"; then
-		say "Admin password ensured in ZITADEL."
-	else
-		say "Automatic admin password reset was not available for this ZITADEL version."
-		say "Manual command inside the container:"
-		say "  zitadel users human change-password --login-name '$login_name' --password '$new_pass'"
-		say "See $NB_LOG/zitadel_chpass.err for details."
-	fi
+	# ZITADEL is distroless (no shell) and this version has no 'users' CLI subcommand.
+	# The admin account is bootstrapped correctly on first start via
+	# ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD in the generated env file.
+	# Secret files are preserved across reruns so the credentials never rotate unintentionally.
+	say "ZITADEL admin bootstrapped via env. Credentials:"
+	say "  Login:    ${ADMIN_USER_LOCAL}@${NB_ORG}.${NB_DOMAIN}"
+	say "  Password: see $ADMIN_PASS_FILE"
 }
 
 #######################################
@@ -662,7 +709,7 @@ docker network inspect "$NB_DOCKER_NETWORK" >/dev/null 2>&1 || docker network cr
 )
 
 validate_running_services
-wait_for_http "http://127.0.0.1:$NB_ZITADEL_BACKEND_PORT/.well-known/openid-configuration" "ZITADEL OIDC configuration"
+wait_for_http "http://127.0.0.1:$NB_ZITADEL_BACKEND_PORT/.well-known/openid-configuration" "ZITADEL OIDC configuration" "$NB_DOMAIN"
 wait_for_http "http://127.0.0.1:$NB_DASHBOARD_BACKEND_PORT/" "NetBird dashboard"
 ensure_admin_user
 
@@ -702,5 +749,14 @@ and datastore encryption keys are preserved unless you replace the files
 under $NB_SECRETS yourself.
 ================================================================================
 OUT
+
+if grep -q 'replace-me' "$NETBIRD_ENV_FILE" 2>/dev/null; then
+	say ""
+	say "WARNING: OIDC credentials are still placeholders in $NETBIRD_ENV_FILE"
+	say "  NetBird authentication will not work until you set:"
+	say "    NB_AUTH_CLIENT_ID, NB_AUTH_CLIENT_SECRET,"
+	say "    NB_IDP_MGMT_CLIENT_ID, NB_IDP_MGMT_CLIENT_SECRET"
+	say "  then rerun this script."
+fi
 
 exit 0
