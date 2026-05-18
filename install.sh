@@ -1,6 +1,6 @@
 #!/bin/sh
 # POSIX-compliant installer/updater for a self-hosted NetBird stack
-# Components: ZITADEL (IdP), NetBird management, dashboard, signal, coturn (TURN)
+# Components: Keycloak (IdP), NetBird management, dashboard, signal, coturn (TURN)
 # Repo reference: https://github.com/scriptmgr/netbird
 
 set -eu
@@ -20,7 +20,6 @@ as_root() { [ "$(id -u)" -eq 0 ] || die "please run as root (sudo sh ./install.s
 randpass() {
 	length="${1:-24}"
 	# Generate alphanumeric base one char shorter, then append a symbol.
-	# ZITADEL's default complexity policy requires upper, lower, digit, and symbol.
 	# Symbols chosen are safe in double-quoted env values and YAML scalars.
 	base_len="$((length - 1))"
 	if have_cmd openssl; then
@@ -80,6 +79,14 @@ ensure_value_file() {
 	fi
 }
 
+# json_field KEY JSON_STRING
+# Extracts a top-level string field from a JSON object using python3.
+json_field() {
+	key="$1"
+	input="$2"
+	printf '%s' "$input" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$key',''), end='')" 2>/dev/null || printf ''
+}
+
 selinux_enabled() {
 	if have_cmd getenforce; then
 		mode="$(getenforce 2>/dev/null || printf 'Disabled')"
@@ -113,15 +120,9 @@ firewall_open_port() {
 wait_for_http() {
 	url="$1"
 	label="$2"
-	# Optional: host header override (for ZITADEL instance lookup by domain name)
-	host_hdr="${3:-}"
 	attempt=1
-	while [ "$attempt" -le 60 ]; do
-		if [ -n "$host_hdr" ]; then
-			http_code="$(curl -ksS -H "Host: $host_hdr" -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || printf '000')"
-		else
-			http_code="$(curl -ksS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || printf '000')"
-		fi
+	while [ "$attempt" -le 150 ]; do
+		http_code="$(curl -ksS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || printf '000')"
 		case "$http_code" in
 			2*) return 0 ;;
 		esac
@@ -170,15 +171,15 @@ os_id() {
 : "${NB_EMAIL_FROM_NAME:=CasjaysDev NetBird}"
 : "${NB_DASHBOARD_BACKEND_PORT:=18080}"
 : "${NB_MANAGEMENT_HTTP_BACKEND_PORT:=18081}"
-: "${NB_ZITADEL_BACKEND_PORT:=18082}"
+: "${NB_KC_BACKEND_PORT:=18082}"
 : "${NB_SIGNAL_BACKEND_PORT:=10000}"
 : "${NB_TURN_PORT:=3478}"
 : "${NB_TURN_MIN_PORT:=49152}"
 : "${NB_TURN_MAX_PORT:=49252}"
-: "${NB_AUTH_CLIENT_ID:=replace-me-client-id}"
-: "${NB_AUTH_CLIENT_SECRET:=replace-me-client-secret}"
-: "${NB_IDP_MGMT_CLIENT_ID:=replace-me-management-client-id}"
-: "${NB_IDP_MGMT_CLIENT_SECRET:=replace-me-management-client-secret}"
+: "${NB_AUTH_CLIENT_ID:=replace-me}"
+: "${NB_AUTH_CLIENT_SECRET:=}"
+: "${NB_IDP_MGMT_CLIENT_ID:=replace-me}"
+: "${NB_IDP_MGMT_CLIENT_SECRET:=replace-me}"
 : "${NB_AUTH_SUPPORTED_SCOPES:=openid profile email offline_access}"
 
 NB_ETC="$NB_ROOT/etc"
@@ -188,32 +189,29 @@ NB_COMPOSE="$NB_ROOT/compose"
 NB_STATE="$NB_ROOT/state"
 NB_LOG="$NB_ROOT/log"
 
-ZITADEL_DATA="$NB_DATA/zitadel"
-ZITA_DB_DATA="$NB_DATA/postgres"
+KC_DATA="$NB_DATA/keycloak"
+KC_DB_DATA="$NB_DATA/keycloak-db"
 TURN_DATA="$NB_DATA/turn"
 MGMT_DATA="$NB_DATA/management"
 SIGNAL_DATA="$NB_DATA/signal"
 
-ADMIN_USER_LOCAL="administrator"
 TURN_USER_LOCAL="netbird"
 
-ADMIN_PASS_FILE="$NB_SECRETS/admin_password"
-MASTER_KEY_FILE="$NB_SECRETS/zitadel_master_key"
-POSTGRES_PASS_FILE="$NB_SECRETS/postgres_password"
-ZITADEL_DB_PASS_FILE="$NB_SECRETS/zitadel_db_password"
+KC_ADMIN_PASS_FILE="$NB_SECRETS/kc_admin_password"
+KC_DB_PASS_FILE="$NB_SECRETS/kc_db_password"
 TURN_PASS_FILE="$NB_SECRETS/turn_password"
 TURN_USER_FILE="$NB_SECRETS/turn_user"
 DATASTORE_KEY_FILE="$NB_SECRETS/netbird_datastore_key"
 
-ZITADEL_ENV_FILE="$NB_ETC/zitadel.env"
+KC_ENV_FILE="$NB_ETC/keycloak.env"
 NETBIRD_ENV_FILE="$NB_ETC/netbird.env"
 DASHBOARD_ENV_FILE="$NB_ETC/dashboard.env"
 TURN_CONF_FILE="$NB_ETC/turnserver.conf"
 MGMT_JSON_FILE="$NB_ETC/management.json"
 DC_FILE="$NB_COMPOSE/docker-compose.yml"
 
-ZITADEL_SVC="zitadel"
-ZITA_DB_SVC="zitadel-db"
+KC_SVC="keycloak"
+KC_DB_SVC="keycloak-db"
 TURN_SVC="coturn"
 MGMT_SVC="management"
 DASH_SVC="dashboard"
@@ -228,11 +226,13 @@ need_cmd curl
 need_cmd grep
 need_cmd install
 need_cmd printf
+need_cmd python3
 need_cmd sed
 need_cmd systemctl
 need_cmd uname
 
-mkdir -p "$NB_ETC" "$NB_DATA" "$NB_SECRETS" "$NB_COMPOSE" "$NB_STATE" "$NB_LOG" "$ZITADEL_DATA" "$ZITA_DB_DATA" "$TURN_DATA" "$MGMT_DATA" "$SIGNAL_DATA"
+mkdir -p "$NB_ETC" "$NB_DATA" "$NB_SECRETS" "$NB_COMPOSE" "$NB_STATE" "$NB_LOG" \
+         "$KC_DATA" "$KC_DB_DATA" "$TURN_DATA" "$MGMT_DATA" "$SIGNAL_DATA"
 chmod 700 "$NB_SECRETS"
 
 #######################################
@@ -249,7 +249,7 @@ install_docker() {
 		case "$linux_id" in
 		ubuntu | debian | raspbian)
 			need_cmd apt-get
-			if dpkg -l | grep -qE '^ii[[:space:]]+docker\.io'; then
+			if dpkg -l | grep -qE -- '^ii[[:space:]]+docker\.io'; then
 				say "Removing docker.io package to avoid conflicts..."
 				apt-get remove -y docker.io
 			fi
@@ -334,48 +334,35 @@ configure_host_integration() {
 # Generate secrets and config
 #######################################
 ensure_runtime_secrets() {
-	ensure_secret_file "$ADMIN_PASS_FILE" 24 "admin password"
-	ensure_secret_file "$MASTER_KEY_FILE" 32 "ZITADEL master key"
-	ensure_secret_file "$POSTGRES_PASS_FILE" 32 "Postgres password"
-	ensure_secret_file "$ZITADEL_DB_PASS_FILE" 32 "ZITADEL database password"
+	ensure_secret_file "$KC_ADMIN_PASS_FILE" 24 "Keycloak admin password"
+	ensure_secret_file "$KC_DB_PASS_FILE" 32 "Keycloak database password"
 	ensure_secret_file "$TURN_PASS_FILE" 32 "TURN password"
 	ensure_datastore_key
 	ensure_value_file "$TURN_USER_FILE" "$TURN_USER_LOCAL" "TURN username"
 }
 
-write_zitadel_env() {
-	cat >"$ZITADEL_ENV_FILE" <<EOF
+write_keycloak_env() {
+	cat >"$KC_ENV_FILE" <<EOF
 # Autogenerated by install.sh
 TZ="$NB_TIMEZONE"
 
-POSTGRES_USER=root
-POSTGRES_PASSWORD=$(read_value "$POSTGRES_PASS_FILE")
-POSTGRES_DB=zitadel
+POSTGRES_DB=keycloak
+POSTGRES_USER=keycloak
+POSTGRES_PASSWORD=$(read_value "$KC_DB_PASS_FILE")
 
-ZITADEL_MASTERKEY="$(read_value "$MASTER_KEY_FILE")"
-ZITADEL_TLS_MODE=external
-ZITADEL_FIRSTINSTANCE_ORG_NAME="$NB_ORG"
-ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME="$ADMIN_USER_LOCAL"
-ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD="$(read_value "$ADMIN_PASS_FILE")"
-ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL="admin@$NB_DOMAIN"
-ZITADEL_EXTERNALPORT="$NB_EXTERNAL_PORT"
-ZITADEL_EXTERNALDOMAIN="$NB_DOMAIN"
-ZITADEL_EXTERNALSECURE=true
-ZITADEL_DATABASE_POSTGRES_HOST="$ZITA_DB_SVC"
-ZITADEL_DATABASE_POSTGRES_PORT=5432
-ZITADEL_DATABASE_POSTGRES_DATABASE=zitadel
-ZITADEL_DATABASE_POSTGRES_USER_USERNAME=zitadel
-ZITADEL_DATABASE_POSTGRES_USER_PASSWORD="$(read_value "$ZITADEL_DB_PASS_FILE")"
-ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE=disable
-ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME=root
-ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD="$(read_value "$POSTGRES_PASS_FILE")"
-ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE=disable
+KC_DB=postgres
+KC_DB_URL=jdbc:postgresql://$KC_DB_SVC:5432/keycloak
+KC_DB_USERNAME=keycloak
+KC_DB_PASSWORD=$(read_value "$KC_DB_PASS_FILE")
 
-ZITADEL_NOTIFICATIONS_SMTPTLS=false
-ZITADEL_NOTIFICATIONS_SMTP_FROM="$NB_EMAIL_FROM_USER"
-ZITADEL_NOTIFICATIONS_SMTP_PORT="$NB_EMAIL_SMTP_PORT"
-ZITADEL_NOTIFICATIONS_SMTP_HOST="$NB_EMAIL_SMTP_HOST"
-ZITADEL_NOTIFICATIONS_SMTPSENDERNAME="$NB_EMAIL_FROM_NAME"
+KEYCLOAK_ADMIN=admin
+KEYCLOAK_ADMIN_PASSWORD=$(read_value "$KC_ADMIN_PASS_FILE")
+
+KC_HOSTNAME=https://$NB_DOMAIN:$NB_EXTERNAL_PORT
+KC_HTTP_ENABLED=true
+KC_PROXY_HEADERS=xforwarded
+KC_HOSTNAME_STRICT=false
+KC_HEALTH_ENABLED=true
 EOF
 }
 
@@ -387,9 +374,9 @@ write_netbird_env() {
 # Autogenerated by install.sh
 TZ="$NB_TIMEZONE"
 
-NB_AUTH_ISSUER=https://$NB_DOMAIN:$NB_EXTERNAL_PORT
-NB_AUTH_OIDC_CONFIGURATION_ENDPOINT=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/.well-known/openid-configuration
-NB_AUTH_TOKEN_ENDPOINT=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/oauth/v2/token
+NB_AUTH_ISSUER=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/realms/netbird
+NB_AUTH_OIDC_CONFIGURATION_ENDPOINT=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/realms/netbird/.well-known/openid-configuration
+NB_AUTH_TOKEN_ENDPOINT=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/realms/netbird/protocol/openid-connect/token
 NB_AUTH_CLIENT_ID=$NB_AUTH_CLIENT_ID
 NB_AUTH_CLIENT_SECRET=$NB_AUTH_CLIENT_SECRET
 NB_IDP_MGMT_CLIENT_ID=$NB_IDP_MGMT_CLIENT_ID
@@ -479,28 +466,28 @@ write_management_json() {
     "Address": "0.0.0.0:8080",
     "AuthIssuer": "$NB_AUTH_ISSUER",
     "AuthAudience": "$NB_AUTH_CLIENT_ID",
-    "IdpSignKeyRefreshEnabled": true,
-    "OIDCConfigEndpoint": "http://$NB_DOMAIN:8080/.well-known/openid-configuration"
+    "AuthKeysLocation": "http://$KC_SVC:8080/realms/netbird/protocol/openid-connect/certs",
+    "IdpSignKeyRefreshEnabled": true
   },
   "IdpManagerConfig": {
-    "ManagerType": "zitadel",
+    "ManagerType": "keycloak",
     "ClientConfig": {
       "Issuer": "$NB_AUTH_ISSUER",
-      "TokenEndpoint": "http://$NB_DOMAIN:8080/oauth/v2/token",
+      "TokenEndpoint": "http://$KC_SVC:8080/realms/netbird/protocol/openid-connect/token",
       "ClientID": "$NB_IDP_MGMT_CLIENT_ID",
       "ClientSecret": "$NB_IDP_MGMT_CLIENT_SECRET",
       "GrantType": "client_credentials"
     },
     "ExtraConfig": {
-      "ManagementEndpoint": "http://$NB_DOMAIN:8080/management/v1"
+      "AdminEndpoint": "http://$KC_SVC:8080/admin/realms/netbird"
     }
   },
   "PKCEAuthorizationFlow": {
     "ProviderConfig": {
       "Audience": "$NB_AUTH_CLIENT_ID",
       "ClientID": "$NB_AUTH_CLIENT_ID",
-      "ClientSecret": "$NB_AUTH_CLIENT_SECRET",
-      "AuthorizationEndpoint": "$NB_AUTH_ISSUER/oauth/v2/authorize",
+      "ClientSecret": "",
+      "AuthorizationEndpoint": "$NB_AUTH_ISSUER/protocol/openid-connect/auth",
       "TokenEndpoint": "$NB_AUTH_TOKEN_ENDPOINT",
       "Scope": "$NB_AUTH_SUPPORTED_SCOPES",
       "RedirectURLs": [
@@ -521,13 +508,13 @@ write_compose() {
 # Autogenerated by install.sh — NetBird self-hosted stack
 name: netbird
 services:
-  $ZITA_DB_SVC:
+  $KC_DB_SVC:
     image: docker.io/postgres:16-alpine
     restart: unless-stopped
     env_file:
-      - $ZITADEL_ENV_FILE
+      - $KC_ENV_FILE
     volumes:
-      - $ZITA_DB_DATA:/var/lib/postgresql/data:$rw_opts
+      - $KC_DB_DATA:/var/lib/postgresql/data:$rw_opts
     networks: [$NB_DOCKER_NETWORK]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \$\$POSTGRES_USER -d \$\$POSTGRES_DB"]
@@ -535,26 +522,26 @@ services:
       timeout: 5s
       retries: 12
 
-  $ZITADEL_SVC:
-    image: ghcr.io/zitadel/zitadel:v2.64.1
+  $KC_SVC:
+    image: quay.io/keycloak/keycloak:26.2
     depends_on:
-      $ZITA_DB_SVC:
+      $KC_DB_SVC:
         condition: service_healthy
     restart: unless-stopped
     env_file:
-      - $ZITADEL_ENV_FILE
-    command: >
-      start-from-init
-      --masterkeyFromEnv
-      --tlsMode external
+      - $KC_ENV_FILE
+    command: start
     volumes:
-      - $ZITADEL_DATA:/zitadel:$rw_opts
+      - $KC_DATA:/opt/keycloak/data:$rw_opts
     ports:
-      - 127.0.0.1:$NB_ZITADEL_BACKEND_PORT:8080
-    networks:
-      $NB_DOCKER_NETWORK:
-        aliases:
-          - $NB_DOMAIN
+      - 127.0.0.1:$NB_KC_BACKEND_PORT:8080
+    networks: [$NB_DOCKER_NETWORK]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health/ready || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
 
   $TURN_SVC:
     image: docker.io/coturn/coturn:latest
@@ -570,16 +557,14 @@ services:
   $MGMT_SVC:
     image: docker.io/netbirdio/management:latest
     depends_on:
-      $ZITA_DB_SVC:
+      $KC_DB_SVC:
         condition: service_healthy
-      $ZITADEL_SVC:
-        condition: service_started
+      $KC_SVC:
+        condition: service_healthy
     restart: unless-stopped
     entrypoint:
-      - /bin/sh
-      - -c
-      - until timeout 3 bash -c "exec 3<>/dev/tcp/$NB_DOMAIN/8080" 2>/dev/null; do printf 'waiting for ZITADEL...\n'; sleep 5; done; exec /go/bin/netbird-mgmt management "\$@"
-      - --
+      - /go/bin/netbird-mgmt
+      - management
     command:
       - --port
       - "8080"
@@ -640,7 +625,7 @@ validate_compose_definition() {
 	(
 		cd "$NB_COMPOSE"
 		set -a
-		. "$ZITADEL_ENV_FILE"
+		. "$KC_ENV_FILE"
 		. "$NETBIRD_ENV_FILE"
 		set +a
 		docker compose config >/dev/null
@@ -653,8 +638,8 @@ validate_running_services() {
 	while [ "$attempt" -le 60 ]; do
 		all_running=1
 		running_services="$(docker compose -f "$DC_FILE" ps --services --status running 2>/dev/null)"
-		for service in "$ZITA_DB_SVC" "$ZITADEL_SVC" "$TURN_SVC" "$MGMT_SVC" "$DASH_SVC" "$SIG_SVC"; do
-			if ! printf '%s\n' "$running_services" | grep -qx "$service"; then
+		for service in "$KC_DB_SVC" "$KC_SVC" "$TURN_SVC" "$MGMT_SVC" "$DASH_SVC" "$SIG_SVC"; do
+			if ! printf '%s\n' "$running_services" | grep -qx -- "$service"; then
 				all_running=0
 				break
 			fi
@@ -665,19 +650,154 @@ validate_running_services() {
 	done
 	# Final pass — report which service(s) failed
 	running_services="$(docker compose -f "$DC_FILE" ps --services --status running 2>/dev/null)"
-	for service in "$ZITA_DB_SVC" "$ZITADEL_SVC" "$TURN_SVC" "$MGMT_SVC" "$DASH_SVC" "$SIG_SVC"; do
-		printf '%s\n' "$running_services" | grep -qx "$service" || die "service did not reach running state: $service"
+	for service in "$KC_DB_SVC" "$KC_SVC" "$TURN_SVC" "$MGMT_SVC" "$DASH_SVC" "$SIG_SVC"; do
+		printf '%s\n' "$running_services" | grep -qx -- "$service" || die "service did not reach running state: $service"
 	done
 }
 
 ensure_admin_user() {
-	# ZITADEL is distroless (no shell) and this version has no 'users' CLI subcommand.
-	# The admin account is bootstrapped correctly on first start via
-	# ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD in the generated env file.
-	# Secret files are preserved across reruns so the credentials never rotate unintentionally.
-	say "ZITADEL admin bootstrapped via env. Credentials:"
-	say "  Login:    ${ADMIN_USER_LOCAL}@${NB_ORG}.${NB_DOMAIN}"
-	say "  Password: see $ADMIN_PASS_FILE"
+	say "Keycloak admin credentials:"
+	say "  URL:      https://$NB_DOMAIN:$NB_EXTERNAL_PORT"
+	say "  Username: admin"
+	say "  Password: see $KC_ADMIN_PASS_FILE"
+}
+
+# auto_configure_oidc — uses the Keycloak admin REST API to create the netbird
+# realm, PKCE client, and management service account automatically.
+# Runs only when netbird.env still contains placeholder credentials.
+# On subsequent runs this function is a no-op.
+auto_configure_oidc() {
+	# Already configured — nothing to do
+	if ! grep -q -- 'replace-me' "$NETBIRD_ENV_FILE" 2>/dev/null; then
+		return 0
+	fi
+
+	say "Auto-configuring Keycloak OIDC for NetBird..."
+
+	kc_url="http://127.0.0.1:$NB_KC_BACKEND_PORT"
+	kc_admin_pass="$(read_value "$KC_ADMIN_PASS_FILE")"
+
+	# ------------------------------------------------------------------
+	# 1. Obtain admin token from master realm
+	# ------------------------------------------------------------------
+	token_resp=$(curl -sSf \
+		--data-urlencode "grant_type=password" \
+		--data-urlencode "client_id=admin-cli" \
+		--data-urlencode "username=admin" \
+		--data-urlencode "password=$kc_admin_pass" \
+		"$kc_url/realms/master/protocol/openid-connect/token") \
+		|| die "OIDC setup: failed to obtain Keycloak admin token"
+	admin_token=$(printf '%s' "$token_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"], end="")')
+	[ -n "$admin_token" ] || die "OIDC setup: empty admin token"
+	say "  Keycloak admin token obtained"
+
+	# ------------------------------------------------------------------
+	# 2. Create netbird realm
+	# ------------------------------------------------------------------
+	curl -sSf -X POST \
+		-H "Authorization: Bearer $admin_token" \
+		-H "Content-Type: application/json" \
+		-d '{"realm":"netbird","enabled":true,"displayName":"NetBird","registrationAllowed":true,"resetPasswordAllowed":true}' \
+		"$kc_url/admin/realms" >/dev/null \
+		|| say "  Note: netbird realm may already exist, continuing..."
+	say "  Realm 'netbird' ensured"
+
+	# ------------------------------------------------------------------
+	# 3. Create PKCE public client (for end users / NetBird CLI / dashboard)
+	# ------------------------------------------------------------------
+	curl -sSf -X POST \
+		-H "Authorization: Bearer $admin_token" \
+		-H "Content-Type: application/json" \
+		-d '{"clientId":"netbird-client","enabled":true,"publicClient":true,"standardFlowEnabled":true,"directAccessGrantsEnabled":false,"redirectUris":["http://localhost:53000/*","http://localhost:54000/*"],"webOrigins":["+"]}' \
+		"$kc_url/admin/realms/netbird/clients" >/dev/null \
+		|| say "  Note: netbird-client may already exist, continuing..."
+	say "  PKCE client 'netbird-client' ensured"
+
+	# ------------------------------------------------------------------
+	# 4. Add audience mapper to netbird-client so access tokens contain
+	#    netbird-client in the aud claim (required by NetBird management)
+	# ------------------------------------------------------------------
+	nb_client_uuid=$(curl -sSf \
+		-H "Authorization: Bearer $admin_token" \
+		"$kc_url/admin/realms/netbird/clients?clientId=netbird-client" \
+		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
+	[ -n "$nb_client_uuid" ] || die "OIDC setup: could not find netbird-client UUID"
+
+	curl -sSf -X POST \
+		-H "Authorization: Bearer $admin_token" \
+		-H "Content-Type: application/json" \
+		-d '{"name":"netbird-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper","config":{"id.token.claim":"false","access.token.claim":"true","included.client.audience":"netbird-client"}}' \
+		"$kc_url/admin/realms/netbird/clients/$nb_client_uuid/protocol-mappers/models" >/dev/null \
+		|| say "  Note: audience mapper may already exist, continuing..."
+	say "  Audience mapper added to netbird-client"
+
+	# ------------------------------------------------------------------
+	# 5. Create confidential service account client (for management backend)
+	# ------------------------------------------------------------------
+	curl -sSf -X POST \
+		-H "Authorization: Bearer $admin_token" \
+		-H "Content-Type: application/json" \
+		-d '{"clientId":"netbird-management","enabled":true,"publicClient":false,"serviceAccountsEnabled":true,"standardFlowEnabled":false,"clientAuthenticatorType":"client-secret"}' \
+		"$kc_url/admin/realms/netbird/clients" >/dev/null \
+		|| say "  Note: netbird-management client may already exist, continuing..."
+	say "  Service account client 'netbird-management' ensured"
+
+	# ------------------------------------------------------------------
+	# 6. Fetch management client UUID and regenerate secret
+	# ------------------------------------------------------------------
+	mgmt_uuid=$(curl -sSf \
+		-H "Authorization: Bearer $admin_token" \
+		"$kc_url/admin/realms/netbird/clients?clientId=netbird-management" \
+		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
+	[ -n "$mgmt_uuid" ] || die "OIDC setup: could not find netbird-management UUID"
+
+	secret_resp=$(curl -sSf -X POST \
+		-H "Authorization: Bearer $admin_token" \
+		"$kc_url/admin/realms/netbird/clients/$mgmt_uuid/client-secret")
+	mgmt_secret=$(printf '%s' "$secret_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"], end="")')
+	[ -n "$mgmt_secret" ] || die "OIDC setup: could not obtain management client secret"
+	say "  Management client secret generated"
+
+	# ------------------------------------------------------------------
+	# 7. Grant realm-admin role to the management service account so it
+	#    can manage users via the Keycloak admin API
+	# ------------------------------------------------------------------
+	sa_user_id=$(curl -sSf \
+		-H "Authorization: Bearer $admin_token" \
+		"$kc_url/admin/realms/netbird/clients/$mgmt_uuid/service-account-user" \
+		| python3 -c 'import sys,json; print(json.load(sys.stdin)["id"], end="")')
+	[ -n "$sa_user_id" ] || die "OIDC setup: could not find service account user ID"
+
+	rm_uuid=$(curl -sSf \
+		-H "Authorization: Bearer $admin_token" \
+		"$kc_url/admin/realms/netbird/clients?clientId=realm-management" \
+		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
+	[ -n "$rm_uuid" ] || die "OIDC setup: could not find realm-management client UUID"
+
+	realm_admin_role=$(curl -sSf \
+		-H "Authorization: Bearer $admin_token" \
+		"$kc_url/admin/realms/netbird/clients/$rm_uuid/roles/realm-admin")
+	[ -n "$realm_admin_role" ] || die "OIDC setup: could not fetch realm-admin role"
+
+	curl -sSf -X POST \
+		-H "Authorization: Bearer $admin_token" \
+		-H "Content-Type: application/json" \
+		-d "[$realm_admin_role]" \
+		"$kc_url/admin/realms/netbird/users/$sa_user_id/role-mappings/clients/$rm_uuid" >/dev/null \
+		|| say "  Note: realm-admin role may already be assigned, continuing..."
+	say "  realm-admin role assigned to netbird-management service account"
+
+	# ------------------------------------------------------------------
+	# 8. Update netbird.env with the real credentials
+	# ------------------------------------------------------------------
+	sed -i \
+		-e "s|^NB_AUTH_CLIENT_ID=.*|NB_AUTH_CLIENT_ID=netbird-client|" \
+		-e "s|^NB_AUTH_CLIENT_SECRET=.*|NB_AUTH_CLIENT_SECRET=|" \
+		-e "s|^NB_IDP_MGMT_CLIENT_ID=.*|NB_IDP_MGMT_CLIENT_ID=netbird-management|" \
+		-e "s|^NB_IDP_MGMT_CLIENT_SECRET=.*|NB_IDP_MGMT_CLIENT_SECRET=$mgmt_secret|" \
+		"$NETBIRD_ENV_FILE"
+	say "  Updated $NETBIRD_ENV_FILE with Keycloak credentials"
+	say "OIDC auto-configuration complete."
 }
 
 #######################################
@@ -687,11 +807,11 @@ install_docker
 configure_host_integration
 ensure_runtime_secrets
 
-write_zitadel_env
+write_keycloak_env
 write_netbird_env
 
 set -a
-. "$ZITADEL_ENV_FILE"
+. "$KC_ENV_FILE"
 . "$NETBIRD_ENV_FILE"
 set +a
 
@@ -706,7 +826,7 @@ docker network inspect "$NB_DOCKER_NETWORK" >/dev/null 2>&1 || docker network cr
 (
 	cd "$NB_COMPOSE"
 	set -a
-	. "$ZITADEL_ENV_FILE"
+	. "$KC_ENV_FILE"
 	. "$NETBIRD_ENV_FILE"
 	set +a
 	docker compose pull
@@ -714,8 +834,40 @@ docker network inspect "$NB_DOCKER_NETWORK" >/dev/null 2>&1 || docker network cr
 )
 
 validate_running_services
-wait_for_http "http://127.0.0.1:$NB_ZITADEL_BACKEND_PORT/.well-known/openid-configuration" "ZITADEL OIDC configuration" "$NB_DOMAIN"
+wait_for_http "http://127.0.0.1:$NB_KC_BACKEND_PORT/health/ready" "Keycloak"
 wait_for_http "http://127.0.0.1:$NB_DASHBOARD_BACKEND_PORT/" "NetBird dashboard"
+
+# Auto-configure Keycloak OIDC on first install (no-op on reruns)
+auto_configure_oidc
+
+# If OIDC was just configured, reload env and rewrite + restart affected services
+if ! grep -q 'replace-me' "$NETBIRD_ENV_FILE" 2>/dev/null; then
+	set -a
+	. "$NETBIRD_ENV_FILE"
+	set +a
+	# Rewrite configs that embed the client IDs
+	write_dashboard_env
+	write_management_json
+	(
+		cd "$NB_COMPOSE"
+		set -a
+		. "$KC_ENV_FILE"
+		. "$NETBIRD_ENV_FILE"
+		set +a
+		docker compose up -d --force-recreate "$MGMT_SVC" "$DASH_SVC"
+	)
+	say "Waiting for management and dashboard to restart with real OIDC config..."
+	attempt=1
+	while [ "$attempt" -le 30 ]; do
+		running="$(docker compose -f "$DC_FILE" ps --services --status running 2>/dev/null)"
+		if printf '%s\n' "$running" | grep -qx -- "$MGMT_SVC" && printf '%s\n' "$running" | grep -qx -- "$DASH_SVC"; then
+			break
+		fi
+		sleep 5
+		attempt=$((attempt + 1))
+	done
+fi
+
 ensure_admin_user
 
 cat <<OUT
@@ -730,38 +882,26 @@ Host integration:
 Local reverse-proxy backends:
   - Dashboard root                          -> http://127.0.0.1:$NB_DASHBOARD_BACKEND_PORT
   - Management REST / websocket proxy       -> http://127.0.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT
-  - Zitadel OIDC / UI                       -> http://127.0.0.1:$NB_ZITADEL_BACKEND_PORT
+  - Keycloak OIDC / UI                      -> http://127.0.0.1:$NB_KC_BACKEND_PORT
   - Signal                                  -> http://127.0.0.1:$NB_SIGNAL_BACKEND_PORT
   - TURN                                    -> udp/$NB_TURN_PORT and udp/$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT
 
-Admin account:
-  - Username: ${ADMIN_USER_LOCAL}@${NB_ORG}.${NB_DOMAIN}
-  - Password file: $ADMIN_PASS_FILE
+Keycloak admin:
+  - URL:      https://$NB_DOMAIN:$NB_EXTERNAL_PORT
+  - Username: admin
+  - Password: see $KC_ADMIN_PASS_FILE
 
 Important config files:
-  - Zitadel bootstrap env:   $ZITADEL_ENV_FILE
-  - NetBird env:             $NETBIRD_ENV_FILE
-  - Dashboard env:           $DASHBOARD_ENV_FILE
-  - Management config:       $MGMT_JSON_FILE
-  - Coturn config:           $TURN_CONF_FILE
-
-Next manual production step:
-  - Fill NB_AUTH_CLIENT_ID, NB_AUTH_CLIENT_SECRET, NB_IDP_MGMT_CLIENT_ID, and
-    NB_IDP_MGMT_CLIENT_SECRET in $NETBIRD_ENV_FILE, then rerun this script.
+  - Keycloak env:        $KC_ENV_FILE
+  - NetBird env:         $NETBIRD_ENV_FILE
+  - Dashboard env:       $DASHBOARD_ENV_FILE
+  - Management config:   $MGMT_JSON_FILE
+  - Coturn config:       $TURN_CONF_FILE
 
 This script is idempotent for reruns: generated secrets, database credentials,
 and datastore encryption keys are preserved unless you replace the files
 under $NB_SECRETS yourself.
 ================================================================================
 OUT
-
-if grep -q 'replace-me' "$NETBIRD_ENV_FILE" 2>/dev/null; then
-	say ""
-	say "WARNING: OIDC credentials are still placeholders in $NETBIRD_ENV_FILE"
-	say "  NetBird authentication will not work until you set:"
-	say "    NB_AUTH_CLIENT_ID, NB_AUTH_CLIENT_SECRET,"
-	say "    NB_IDP_MGMT_CLIENT_ID, NB_IDP_MGMT_CLIENT_SECRET"
-	say "  then rerun this script."
-fi
 
 exit 0
