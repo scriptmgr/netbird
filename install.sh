@@ -172,6 +172,7 @@ os_id() {
 : "${NB_DASHBOARD_BACKEND_PORT:=18080}"
 : "${NB_MANAGEMENT_HTTP_BACKEND_PORT:=18081}"
 : "${NB_KC_BACKEND_PORT:=18082}"
+: "${NB_KC_MGMT_PORT:=18083}"
 : "${NB_SIGNAL_BACKEND_PORT:=10000}"
 : "${NB_TURN_PORT:=3478}"
 : "${NB_TURN_MIN_PORT:=49152}"
@@ -535,13 +536,14 @@ services:
       - $KC_DATA:/opt/keycloak/data:$rw_opts
     ports:
       - 127.0.0.1:$NB_KC_BACKEND_PORT:8080
+      - 127.0.0.1:$NB_KC_MGMT_PORT:9000
     networks: [$NB_DOCKER_NETWORK]
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/health/ready || exit 1"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && printf 'GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '200' <&3"]
       interval: 15s
       timeout: 10s
-      retries: 20
-      start_period: 90s
+      retries: 30
+      start_period: 300s
 
   $TURN_SVC:
     image: docker.io/coturn/coturn:latest
@@ -614,6 +616,7 @@ services:
 
 networks:
   $NB_DOCKER_NETWORK:
+    name: $NB_DOCKER_NETWORK
     driver: bridge
 EOF
 }
@@ -821,8 +824,6 @@ write_management_json
 write_compose
 validate_compose_definition
 
-docker network inspect "$NB_DOCKER_NETWORK" >/dev/null 2>&1 || docker network create "$NB_DOCKER_NETWORK" >/dev/null
-
 (
 	cd "$NB_COMPOSE"
 	set -a
@@ -834,7 +835,7 @@ docker network inspect "$NB_DOCKER_NETWORK" >/dev/null 2>&1 || docker network cr
 )
 
 validate_running_services
-wait_for_http "http://127.0.0.1:$NB_KC_BACKEND_PORT/health/ready" "Keycloak"
+wait_for_http "http://127.0.0.1:$NB_KC_MGMT_PORT/health/ready" "Keycloak"
 wait_for_http "http://127.0.0.1:$NB_DASHBOARD_BACKEND_PORT/" "NetBird dashboard"
 
 # Auto-configure Keycloak OIDC on first install (no-op on reruns)
