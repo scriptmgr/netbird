@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(shellcheck *)",
+      "Read(**)",
+      "Write(install.sh)",
+      "Write(.env.example)",
+      "Write(README.md)",
+      "Write(AI.md)",
+      "Write(IDEA.md)",
+      "Write(CLAUDE.md)",
+      "Write(release.txt)",
+      "Write(LICENSE.md)",
+      "Write(.gitignore)",
+      "Write(.claude/settings.json)",
+      "Write(.git/COMMIT_MESS)"
+    ],
+    "deny": []
+  }
+}

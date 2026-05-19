@@ -102,5 +102,18 @@ $RECYCLE.BIN/
 
 # site-specific installer overrides (contains personal values)
 .env
+app.env
+default.env
+*.local
+
+# Claude Code runtime files
+.claude/settings.local.json
+.claude/backups/
+.claude/cache/
+.claude/file-history/
+.claude/history.jsonl
+.claude/projects/
+.claude/statsFile
+.claude/*.lock
 
 
