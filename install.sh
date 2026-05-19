@@ -1,21 +1,37 @@
-#!/bin/sh
-# POSIX-compliant installer/updater for a self-hosted NetBird stack
-# Components: Keycloak (IdP), NetBird management, dashboard, signal, coturn (TURN)
-# Repo reference: https://github.com/scriptmgr/netbird
-##@Version           :  YYYYMMDDHHMM-git
-##@Author            :  CasjaysDev
-##@Contact           :  casjay@yahoo.com
-##@License           :  MIT
-##@ReadME            :  README.md
-##@Created           :  2025-11-19
+#!/usr/bin/env sh
+# shellcheck shell=sh
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+##@Version           :  202605191052-git
+# @@Author           :  Jason Hempstead
+# @@Contact          :  git-admin@casjaysdev.pro
+# @@License          :  MIT or LICENSE.md
+# @@ReadME           :  install.sh --help | README.md
+# @@Copyright        :  Copyright: (c) 2026 Jason Hempstead, Casjays Developments
+# @@Created          :  Wednesday, November 19, 2025 00:00 UTC
+# @@File             :  install.sh
+# @@Description      :  NetBird self-hosted stack installer and updater
+# @@Changelog        :  New script
+# @@TODO             :  See README.md
+# @@Other            :
+# @@Resource         :  https://netbird.io
+# @@Terminal App     :  yes
+# @@sudo/root        :  yes
+# @@Template         :  shell/sh
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# shellcheck disable=SC1001,SC1003,SC2001,SC2003,SC2016,SC2031,SC2090,SC2115,SC2120,SC2155,SC2199,SC2229,SC2317,SC2329
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 
-VERSION='YYYYMMDDHHMM-git'
+VERSION="202605191052-git"
+
+APPNAME="${0##*/}"
+RUN_USER="${USER}"
+SET_UID="$(id -u)"
+SCRIPT_SRC_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 
 set -eu
 
-#######################################
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Helpers
-#######################################
 __say() { printf '%s\n' "$*"; }
 __die() {
 	__say "ERROR: $*" >&2
@@ -36,8 +52,8 @@ __detect_fqdn() {
 	printf '%s' "$d"
 }
 
-# __validate_fqdn — return 0 if arg looks like a valid FQDN, 1 otherwise
-__validate_fqdn() {
+# __validate__hosts_fqdn — return 0 if arg looks like a valid FQDN, 1 otherwise
+__validate__hosts_fqdn() {
 	fqdn="$1"
 	[ -n "$fqdn" ] || return 1
 	# must contain at least one dot
@@ -191,21 +207,19 @@ __os_id() {
 	fi
 }
 
-#######################################
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Config defaults (override via env before running)
-#######################################
 
 # Load site-specific overrides from an .env file next to this script.
-INSTALL_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "$INSTALL_SCRIPT_DIR/.env" ]; then
+if [ -f "$SCRIPT_SRC_DIR/.env" ]; then
 	set -a
-	. "$INSTALL_SCRIPT_DIR/.env"
+	. "$SCRIPT_SRC_DIR/.env"
 	set +a
 fi
 
 : "${NB_ROOT:=/opt/netbird}"
 : "${NB_DOMAIN:=$(__detect_fqdn)}"
-__validate_fqdn "$NB_DOMAIN" || __die "NB_DOMAIN='$NB_DOMAIN' is not a valid FQDN. Set NB_DOMAIN in .env or export it before running."
+__validate__hosts_fqdn "$NB_DOMAIN" || __die "NB_DOMAIN='$NB_DOMAIN' is not a valid FQDN. Set NB_DOMAIN in .env or export it before running."
 : "${NB_ORG:=netbird}"
 : "${NB_EXTERNAL_PORT:=443}"
 : "${NB_EMAIL_SMTP_HOST:=127.0.0.1}"
@@ -263,9 +277,8 @@ MGMT_SVC="management"
 DASH_SVC="dashboard"
 SIG_SVC="signal"
 
-#######################################
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Pre-flight
-#######################################
 __as_root
 __need_cmd awk
 __need_cmd curl
@@ -281,9 +294,8 @@ mkdir -p "$NB_ETC" "$NB_DATA" "$NB_SECRETS" "$NB_COMPOSE" "$NB_STATE" "$NB_LOG" 
          "$KC_DATA" "$KC_DB_DATA" "$TURN_DATA" "$MGMT_DATA" "$SIGNAL_DATA"
 chmod 700 "$NB_SECRETS"
 
-#######################################
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Install/Upgrade Docker Engine (official repos)
-#######################################
 __install_docker() {
 	if __have_cmd docker; then
 		__say "Docker already present. Ensuring Compose plugin is available..."
@@ -371,9 +383,8 @@ __install_docker() {
 	systemctl is-active docker >/dev/null 2>&1 || systemctl start docker
 }
 
-#######################################
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Kernel modules and sysctl
-#######################################
 
 # Required kernel modules for Docker bridge networking and WireGuard/NetBird peers.
 NB_MODULES="overlay br_netfilter"
@@ -467,9 +478,8 @@ __configure_kernel() {
 	done
 }
 
-#######################################
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Host integration
-#######################################
 __configure_host_integration() {
 	case "$(__os_id)" in
 	almalinux | rocky | centos | rhel | ol)
@@ -487,9 +497,8 @@ __configure_host_integration() {
 	fi
 }
 
-#######################################
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Generate secrets and config
-#######################################
 __ensure_runtime_secrets() {
 	__ensure_secret_file "$KC_ADMIN_PASS_FILE" 24 "Keycloak admin password"
 	__ensure_secret_file "$KC_DB_PASS_FILE" 32 "Keycloak database password"
@@ -807,9 +816,8 @@ networks:
 EOF
 }
 
-#######################################
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Validation and admin bootstrap
-#######################################
 __validate_compose_definition() {
 	(
 		cd "$NB_COMPOSE"
@@ -991,9 +999,8 @@ __auto_configure_oidc() {
 	__say "OIDC auto-configuration complete."
 }
 
-#######################################
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Main flow
-#######################################
 __configure_kernel
 __install_docker
 __configure_host_integration
@@ -1097,3 +1104,4 @@ under $NB_SECRETS yourself.
 OUT
 
 exit 0
+# ex: ts=2 sw=2 et filetype=sh
