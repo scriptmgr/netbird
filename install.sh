@@ -281,6 +281,7 @@ install_docker() {
 			need_cmd dnf
 			dnf -y install dnf-plugins-core
 			dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+			dnf -y remove containerd 2>/dev/null || true
 			dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 			systemctl enable --now docker
 			;;
