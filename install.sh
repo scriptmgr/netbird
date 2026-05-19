@@ -313,6 +313,100 @@ install_docker() {
 }
 
 #######################################
+# Kernel modules and sysctl
+#######################################
+
+# Required kernel modules for Docker bridge networking and WireGuard/NetBird peers.
+NB_MODULES="overlay br_netfilter"
+NB_MODULES_FILE="/etc/modules-load.d/netbird.conf"
+
+# sysctl knobs required by Docker (bridge) and WireGuard (src_valid_mark, rp_filter).
+# Stored in /etc/sysctl.d/99-netbird.conf; also checked/patched in /etc/sysctl.conf.
+NB_SYSCTL_FILE="/etc/sysctl.d/99-netbird.conf"
+# key=value pairs (POSIX, no arrays)
+NB_SYSCTLS="
+net.ipv4.ip_forward=1
+net.bridge.bridge-nf-call-iptables=1
+net.bridge.bridge-nf-call-ip6tables=1
+net.ipv4.conf.all.src_valid_mark=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+"
+
+# Ensure a sysctl key is set to the required value.
+# Checks /etc/sysctl.conf first; if found with the right value, leaves it alone.
+# If found with the wrong value, patches it in place.
+# If not found, delegates to /etc/sysctl.d/99-netbird.conf.
+ensure_sysctl() {
+	key="$1"
+	val="$2"
+	pat=$(printf '%s' "$key" | sed 's/\./\\./g')
+
+	# Check /etc/sysctl.conf
+	if grep -qE "^[[:space:]]*${pat}[[:space:]]*=" /etc/sysctl.conf 2>/dev/null; then
+		cur=$(grep -E "^[[:space:]]*${pat}[[:space:]]*=" /etc/sysctl.conf | tail -1 | sed 's/.*=[[:space:]]*//')
+		if [ "$cur" = "$val" ]; then
+			return 0   # already correct in sysctl.conf
+		fi
+		# Wrong value — patch it in sysctl.conf
+		sed -i "s|^[[:space:]]*${pat}[[:space:]]*=.*|${key} = ${val}|" /etc/sysctl.conf
+		say "  sysctl.conf: updated ${key} = ${val}"
+		return 0
+	fi
+
+	# Not in sysctl.conf — ensure it is in the drop-in file
+	if grep -qE "^[[:space:]]*${pat}[[:space:]]*=" "$NB_SYSCTL_FILE" 2>/dev/null; then
+		cur=$(grep -E "^[[:space:]]*${pat}[[:space:]]*=" "$NB_SYSCTL_FILE" | tail -1 | sed 's/.*=[[:space:]]*//')
+		if [ "$cur" = "$val" ]; then
+			return 0   # already correct in drop-in
+		fi
+		sed -i "s|^[[:space:]]*${pat}[[:space:]]*=.*|${key} = ${val}|" "$NB_SYSCTL_FILE"
+		say "  99-netbird.conf: updated ${key} = ${val}"
+	else
+		printf '%s = %s\n' "$key" "$val" >>"$NB_SYSCTL_FILE"
+		say "  99-netbird.conf: added ${key} = ${val}"
+	fi
+}
+
+configure_kernel() {
+	say "Configuring kernel modules..."
+
+	# --- modules-load.d ---
+	for mod in $NB_MODULES; do
+		# Persist
+		if ! grep -qx -- "$mod" "$NB_MODULES_FILE" 2>/dev/null; then
+			printf '%s\n' "$mod" >>"$NB_MODULES_FILE"
+			say "  modules-load.d: added $mod"
+		fi
+		# Load now (no-op if already loaded)
+		if ! grep -qx -- "$mod" /proc/modules 2>/dev/null && \
+		   ! grep -q "^${mod} " /proc/modules 2>/dev/null; then
+			modprobe "$mod" 2>/dev/null && say "  modprobe: loaded $mod" || \
+				say "  modprobe: $mod unavailable (may already be built-in)"
+		fi
+	done
+
+	# --- sysctl drop-in header (idempotent) ---
+	if [ ! -f "$NB_SYSCTL_FILE" ]; then
+		printf '# Managed by netbird install.sh — do not edit by hand\n' >"$NB_SYSCTL_FILE"
+	fi
+
+	# --- per-key check/patch ---
+	say "Configuring sysctl..."
+	printf '%s\n' "$NB_SYSCTLS" | grep -v '^$' | while IFS='=' read -r k v; do
+		ensure_sysctl "$k" "$v"
+	done
+
+	# --- apply live ---
+	sysctl --system >/dev/null 2>&1 && say "  sysctl: settings applied" || \
+		say "  sysctl: --system apply failed, trying targeted apply"
+	# Belt-and-suspenders: apply each key live even if --system failed
+	printf '%s\n' "$NB_SYSCTLS" | grep -v '^$' | while IFS='=' read -r k v; do
+		sysctl -w "${k}=${v}" >/dev/null 2>&1 || true
+	done
+}
+
+#######################################
 # Host integration
 #######################################
 configure_host_integration() {
@@ -807,6 +901,7 @@ auto_configure_oidc() {
 #######################################
 # Main flow
 #######################################
+configure_kernel
 install_docker
 configure_host_integration
 ensure_runtime_secrets
@@ -878,6 +973,8 @@ cat <<OUT
 NetBird self-hosted stack is up (or updated) at: $NB_ROOT
 
 Host integration:
+  - Kernel modules:   $NB_MODULES_FILE
+  - sysctl drop-in:   $NB_SYSCTL_FILE
   - Firewalld opened: tcp/$NB_EXTERNAL_PORT, udp/$NB_TURN_PORT, udp/$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT
   - SELinux bind relabeling: $(if selinux_enabled; then printf 'enabled'; else printf 'not required'; fi)
 
