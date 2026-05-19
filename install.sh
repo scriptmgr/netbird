@@ -2,27 +2,62 @@
 # POSIX-compliant installer/updater for a self-hosted NetBird stack
 # Components: Keycloak (IdP), NetBird management, dashboard, signal, coturn (TURN)
 # Repo reference: https://github.com/scriptmgr/netbird
+##@Version           :  YYYYMMDDHHMM-git
+##@Author            :  CasjaysDev
+##@Contact           :  casjay@yahoo.com
+##@License           :  MIT
+##@ReadME            :  README.md
+##@Created           :  2025-11-19
+
+VERSION='YYYYMMDDHHMM-git'
 
 set -eu
 
 #######################################
 # Helpers
 #######################################
-say() { printf '%s\n' "$*"; }
-die() {
-	say "ERROR: $*" >&2
+__say() { printf '%s\n' "$*"; }
+__die() {
+	__say "ERROR: $*" >&2
 	exit 1
 }
-have_cmd() { command -v "$1" >/dev/null 2>&1; }
-need_cmd() { have_cmd "$1" || die "missing required command: $1"; }
-as_root() { [ "$(id -u)" -eq 0 ] || die "please run as root (sudo sh ./install.sh)"; }
+__have_cmd() { command -v "$1" >/dev/null 2>&1; }
+__need_cmd() { __have_cmd "$1" || __die "missing required command: $1"; }
+__as_root() { [ "$(id -u)" -eq 0 ] || __die "please run as root (sudo sh ./install.sh)"; }
 
-randpass() {
+# __detect_fqdn — try hostname -d (domain part) then hostname -f (full qualified)
+__detect_fqdn() {
+	d=$(hostname -d 2>/dev/null | tr -d '[:space:]')
+	case "$d" in
+		''|'(none)'|localdomain)
+			d=$(hostname -f 2>/dev/null | tr -d '[:space:]')
+			;;
+	esac
+	printf '%s' "$d"
+}
+
+# __validate_fqdn — return 0 if arg looks like a valid FQDN, 1 otherwise
+__validate_fqdn() {
+	fqdn="$1"
+	[ -n "$fqdn" ] || return 1
+	# must contain at least one dot
+	case "$fqdn" in
+		*.*) ;;
+		*) return 1 ;;
+	esac
+	# reject leading/trailing/double dot or embedded space
+	case "$fqdn" in
+		'.'*|*'.'|*'..'*|*' '*) return 1 ;;
+	esac
+	printf '%s' "$fqdn" | grep -qE -- '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$'
+}
+
+__randpass() {
 	length="${1:-24}"
 	# Generate alphanumeric base one char shorter, then append a symbol.
 	# Symbols chosen are safe in double-quoted env values and YAML scalars.
 	base_len="$((length - 1))"
-	if have_cmd openssl; then
+	if __have_cmd openssl; then
 		base=$(openssl rand -base64 48 | tr -d '\n' | tr -d '/+=' | cut -c1-"$base_len")
 	else
 		base=$(dd if=/dev/urandom bs=64 count=1 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-"$base_len")
@@ -33,40 +68,40 @@ randpass() {
 	printf '%s%s\n' "$base" "$sym"
 }
 
-read_value() {
+__read_value() {
 	file="$1"
-	[ -r "$file" ] || die "unable to read required file: $file"
+	[ -r "$file" ] || __die "unable to read required file: $file"
 	tr -d '\n' <"$file"
 }
 
-ensure_secret_file() {
+__ensure_secret_file() {
 	file="$1"
 	length="$2"
 	label="$3"
 	if [ ! -s "$file" ]; then
 		(
 			umask 077
-			printf '%s\n' "$(randpass "$length")" >"$file"
+			printf '%s\n' "$(__randpass "$length")" >"$file"
 		)
-		say "Generated $label at $file"
+		__say "Generated $label at $file"
 	fi
 }
 
 # DataStoreEncryptionKey must be standard base64 of exactly 32 random bytes
-# (AES-256 key). randpass() produces an arbitrary string that is not valid
+# (AES-256 key). __randpass() produces an arbitrary string that is not valid
 # base64 so it cannot be used here.
-ensure_datastore_key() {
+__ensure_datastore_key() {
 	if [ ! -s "$DATASTORE_KEY_FILE" ]; then
-		need_cmd openssl
+		__need_cmd openssl
 		(
 			umask 077
 			openssl rand -base64 32 >"$DATASTORE_KEY_FILE"
 		)
-		say "Generated NetBird datastore key at $DATASTORE_KEY_FILE"
+		__say "Generated NetBird datastore key at $DATASTORE_KEY_FILE"
 	fi
 }
 
-ensure_value_file() {
+__ensure_value_file() {
 	file="$1"
 	value="$2"
 	label="$3"
@@ -75,20 +110,20 @@ ensure_value_file() {
 			umask 077
 			printf '%s\n' "$value" >"$file"
 		)
-		say "Initialized $label at $file"
+		__say "Initialized $label at $file"
 	fi
 }
 
-# json_field KEY JSON_STRING
+# __json_field KEY JSON_STRING
 # Extracts a top-level string field from a JSON object using python3.
-json_field() {
+__json_field() {
 	key="$1"
 	input="$2"
 	printf '%s' "$input" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$key',''), end='')" 2>/dev/null || printf ''
 }
 
-selinux_enabled() {
-	if have_cmd getenforce; then
+__selinux_enabled() {
+	if __have_cmd getenforce; then
 		mode="$(getenforce 2>/dev/null || printf 'Disabled')"
 		[ "$mode" != "Disabled" ]
 	else
@@ -96,43 +131,43 @@ selinux_enabled() {
 	fi
 }
 
-bind_rw_opts() {
-	if selinux_enabled; then
+__bind_rw_opts() {
+	if __selinux_enabled; then
 		printf 'rw,Z'
 	else
 		printf 'rw'
 	fi
 }
 
-bind_ro_opts() {
-	if selinux_enabled; then
+__bind_ro_opts() {
+	if __selinux_enabled; then
 		printf 'ro,Z'
 	else
 		printf 'ro'
 	fi
 }
 
-firewall_open_port() {
+__firewall_open_port() {
 	port_spec="$1"
 	firewall-cmd --quiet --query-port="$port_spec" >/dev/null 2>&1 || firewall-cmd --quiet --permanent --add-port="$port_spec"
 }
 
-wait_for_http() {
+__wait_for_http() {
 	url="$1"
 	label="$2"
 	attempt=1
 	while [ "$attempt" -le 150 ]; do
 		http_code="$(curl -ksS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || printf '000')"
 		case "$http_code" in
-			2*) return 0 ;;
+			200) return 0 ;;
 		esac
 		sleep 2
 		attempt=$((attempt + 1))
 	done
-	die "timed out waiting for $label at $url"
+	__die "timed out waiting for $label at $url"
 }
 
-wait_for_container_exec() {
+__wait_for_container_exec() {
 	service="$1"
 	attempt=1
 	while [ "$attempt" -le 60 ]; do
@@ -142,10 +177,10 @@ wait_for_container_exec() {
 		sleep 2
 		attempt=$((attempt + 1))
 	done
-	die "timed out waiting for container: $service"
+	__die "timed out waiting for container: $service"
 }
 
-os_id() {
+__os_id() {
 	if [ -f /etc/os-release ]; then
 		(
 			. /etc/os-release
@@ -159,16 +194,26 @@ os_id() {
 #######################################
 # Config defaults (override via env before running)
 #######################################
+
+# Load site-specific overrides from an .env file next to this script.
+INSTALL_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$INSTALL_SCRIPT_DIR/.env" ]; then
+	set -a
+	. "$INSTALL_SCRIPT_DIR/.env"
+	set +a
+fi
+
 : "${NB_ROOT:=/opt/netbird}"
-: "${NB_DOMAIN:=vpn2me.us}"
+: "${NB_DOMAIN:=$(__detect_fqdn)}"
+__validate_fqdn "$NB_DOMAIN" || __die "NB_DOMAIN='$NB_DOMAIN' is not a valid FQDN. Set NB_DOMAIN in .env or export it before running."
 : "${NB_ORG:=netbird}"
-: "${NB_EXTERNAL_PORT:=64453}"
+: "${NB_EXTERNAL_PORT:=443}"
 : "${NB_EMAIL_SMTP_HOST:=127.0.0.1}"
 : "${NB_EMAIL_SMTP_PORT:=25}"
 : "${NB_EMAIL_FROM_USER:=no-reply@$NB_DOMAIN}"
 : "${NB_TIMEZONE:=America/New_York}"
 : "${NB_DOCKER_NETWORK:=netbird}"
-: "${NB_EMAIL_FROM_NAME:=CasjaysDev NetBird}"
+: "${NB_EMAIL_FROM_NAME:=NetBird}"
 : "${NB_DASHBOARD_BACKEND_PORT:=18080}"
 : "${NB_MANAGEMENT_HTTP_BACKEND_PORT:=18081}"
 : "${NB_KC_BACKEND_PORT:=18082}"
@@ -221,16 +266,16 @@ SIG_SVC="signal"
 #######################################
 # Pre-flight
 #######################################
-as_root
-need_cmd awk
-need_cmd curl
-need_cmd grep
-need_cmd install
-need_cmd printf
-need_cmd python3
-need_cmd sed
-need_cmd systemctl
-need_cmd uname
+__as_root
+__need_cmd awk
+__need_cmd curl
+__need_cmd grep
+__need_cmd install
+__need_cmd printf
+__need_cmd python3
+__need_cmd sed
+__need_cmd systemctl
+__need_cmd uname
 
 mkdir -p "$NB_ETC" "$NB_DATA" "$NB_SECRETS" "$NB_COMPOSE" "$NB_STATE" "$NB_LOG" \
          "$KC_DATA" "$KC_DB_DATA" "$TURN_DATA" "$MGMT_DATA" "$SIGNAL_DATA"
@@ -239,23 +284,23 @@ chmod 700 "$NB_SECRETS"
 #######################################
 # Install/Upgrade Docker Engine (official repos)
 #######################################
-install_docker() {
-	if have_cmd docker; then
-		say "Docker already present. Ensuring Compose plugin is available..."
+__install_docker() {
+	if __have_cmd docker; then
+		__say "Docker already present. Ensuring Compose plugin is available..."
 	fi
 
 	case "$(uname -s)" in
 	Linux)
-		linux_id="$(os_id)"
+		linux_id="$(__os_id)"
 		case "$linux_id" in
 		ubuntu | debian | raspbian)
-			need_cmd apt-get
+			__need_cmd apt-get
 			if dpkg -l | grep -qE -- '^ii[[:space:]]+docker\.io'; then
-				say "Removing docker.io package to avoid conflicts..."
+				__say "Removing docker.io package to avoid conflicts..."
 				apt-get remove -y docker.io
 			fi
 			apt-get update -y
-			need_cmd gpg
+			__need_cmd gpg
 			install -m 0755 -d /etc/apt/keyrings
 			if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
 				curl -fsSL "https://download.docker.com/linux/$linux_id/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -265,20 +310,23 @@ install_docker() {
 				. /etc/os-release
 				printf '%s' "$VERSION_CODENAME"
 			)"
-			printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/%s %s stable\n' "$(dpkg --print-architecture)" "$linux_id" "$codename" >/etc/apt/sources.list.d/docker.list
+			arch="$(dpkg --print-architecture)"
+			printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/%s %s stable\n' \
+				"$arch" "$linux_id" "$codename" >/etc/apt/sources.list.d/docker.list
 			apt-get update -y
 			apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 			systemctl enable --now docker
 			;;
 		fedora)
-			need_cmd dnf
+			__need_cmd dnf
 			dnf -y install dnf-plugins-core
 			dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+			dnf -y remove containerd 2>/dev/null || true
 			dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 			systemctl enable --now docker
 			;;
 		almalinux | rocky | centos | rhel | ol)
-			need_cmd dnf
+			__need_cmd dnf
 			dnf -y install dnf-plugins-core
 			dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
 			dnf -y remove containerd 2>/dev/null || true
@@ -286,28 +334,39 @@ install_docker() {
 			systemctl enable --now docker
 			;;
 		opensuse* | sles)
-			need_cmd zypper
+			__need_cmd zypper
 			zypper refresh
 			zypper -n install docker docker-compose
 			systemctl enable --now docker
+			# Distro docker-compose may be a standalone binary, not a CLI plugin.
+			# Symlink it into the CLI plugin directory so 'docker compose' works.
+			mkdir -p /usr/lib/docker/cli-plugins
+			if [ ! -f /usr/lib/docker/cli-plugins/docker-compose ] && __have_cmd docker-compose; then
+				ln -sf "$(command -v docker-compose)" /usr/lib/docker/cli-plugins/docker-compose
+			fi
 			;;
 		arch | manjaro | endeavouros | arcolinux)
-			need_cmd pacman
+			__need_cmd pacman
 			pacman -Sy --noconfirm docker docker-compose
 			systemctl enable --now docker
+			# Same as openSUSE: ensure the CLI plugin path is populated.
+			mkdir -p /usr/lib/docker/cli-plugins
+			if [ ! -f /usr/lib/docker/cli-plugins/docker-compose ] && __have_cmd docker-compose; then
+				ln -sf "$(command -v docker-compose)" /usr/lib/docker/cli-plugins/docker-compose
+			fi
 			;;
 		*)
-			say "Unknown distro '$linux_id'. Attempting to use existing Docker if available."
+			__say "Unknown distro '$linux_id'. Attempting to use existing Docker if available."
 			;;
 		esac
 		;;
 	*)
-		die "Unsupported OS: $(uname -s) (Linux required for server components)"
+		__die "Unsupported OS: $(uname -s) (Linux required for server components)"
 		;;
 	esac
 
-	have_cmd docker || die "Docker not installed"
-	docker compose version >/dev/null 2>&1 || die "Docker Compose plugin not found (docker compose)."
+	__have_cmd docker || __die "Docker not installed"
+	docker compose version >/dev/null 2>&1 || __die "Docker Compose plugin not found (docker compose)."
 	systemctl is-enabled docker >/dev/null 2>&1 || systemctl enable docker
 	systemctl is-active docker >/dev/null 2>&1 || systemctl start docker
 }
@@ -337,52 +396,54 @@ net.ipv4.conf.default.rp_filter=0
 # Checks /etc/sysctl.conf first; if found with the right value, leaves it alone.
 # If found with the wrong value, patches it in place.
 # If not found, delegates to /etc/sysctl.d/99-netbird.conf.
-ensure_sysctl() {
+__ensure_sysctl() {
 	key="$1"
 	val="$2"
 	pat=$(printf '%s' "$key" | sed 's/\./\\./g')
 
 	# Check /etc/sysctl.conf
-	if grep -qE "^[[:space:]]*${pat}[[:space:]]*=" /etc/sysctl.conf 2>/dev/null; then
-		cur=$(grep -E "^[[:space:]]*${pat}[[:space:]]*=" /etc/sysctl.conf | tail -1 | sed 's/.*=[[:space:]]*//')
+	if grep -qE -- "^[[:space:]]*${pat}[[:space:]]*=" /etc/sysctl.conf 2>/dev/null; then
+		cur=$(grep -E -- "^[[:space:]]*${pat}[[:space:]]*=" /etc/sysctl.conf | tail -1 | sed 's/.*=[[:space:]]*//')
 		if [ "$cur" = "$val" ]; then
-			return 0   # already correct in sysctl.conf
+			# already correct in sysctl.conf
+			return 0
 		fi
 		# Wrong value — patch it in sysctl.conf
 		sed -i "s|^[[:space:]]*${pat}[[:space:]]*=.*|${key} = ${val}|" /etc/sysctl.conf
-		say "  sysctl.conf: updated ${key} = ${val}"
+		__say "  sysctl.conf: updated ${key} = ${val}"
 		return 0
 	fi
 
 	# Not in sysctl.conf — ensure it is in the drop-in file
-	if grep -qE "^[[:space:]]*${pat}[[:space:]]*=" "$NB_SYSCTL_FILE" 2>/dev/null; then
-		cur=$(grep -E "^[[:space:]]*${pat}[[:space:]]*=" "$NB_SYSCTL_FILE" | tail -1 | sed 's/.*=[[:space:]]*//')
+	if grep -qE -- "^[[:space:]]*${pat}[[:space:]]*=" "$NB_SYSCTL_FILE" 2>/dev/null; then
+		cur=$(grep -E -- "^[[:space:]]*${pat}[[:space:]]*=" "$NB_SYSCTL_FILE" | tail -1 | sed 's/.*=[[:space:]]*//')
 		if [ "$cur" = "$val" ]; then
-			return 0   # already correct in drop-in
+			# already correct in drop-in
+			return 0
 		fi
 		sed -i "s|^[[:space:]]*${pat}[[:space:]]*=.*|${key} = ${val}|" "$NB_SYSCTL_FILE"
-		say "  99-netbird.conf: updated ${key} = ${val}"
+		__say "  99-netbird.conf: updated ${key} = ${val}"
 	else
 		printf '%s = %s\n' "$key" "$val" >>"$NB_SYSCTL_FILE"
-		say "  99-netbird.conf: added ${key} = ${val}"
+		__say "  99-netbird.conf: added ${key} = ${val}"
 	fi
 }
 
-configure_kernel() {
-	say "Configuring kernel modules..."
+__configure_kernel() {
+	__say "Configuring kernel modules..."
 
 	# --- modules-load.d ---
 	for mod in $NB_MODULES; do
-		# Persist
+		# Persist in modules-load.d
 		if ! grep -qx -- "$mod" "$NB_MODULES_FILE" 2>/dev/null; then
 			printf '%s\n' "$mod" >>"$NB_MODULES_FILE"
-			say "  modules-load.d: added $mod"
+			__say "  modules-load.d: added $mod"
 		fi
 		# Load now (no-op if already loaded)
 		if ! grep -qx -- "$mod" /proc/modules 2>/dev/null && \
-		   ! grep -q "^${mod} " /proc/modules 2>/dev/null; then
-			modprobe "$mod" 2>/dev/null && say "  modprobe: loaded $mod" || \
-				say "  modprobe: $mod unavailable (may already be built-in)"
+		   ! grep -q -- "^${mod} " /proc/modules 2>/dev/null; then
+			modprobe "$mod" 2>/dev/null && __say "  modprobe: loaded $mod" || \
+				__say "  modprobe: $mod unavailable (may already be built-in)"
 		fi
 	done
 
@@ -392,16 +453,16 @@ configure_kernel() {
 	fi
 
 	# --- per-key check/patch ---
-	say "Configuring sysctl..."
-	printf '%s\n' "$NB_SYSCTLS" | grep -v '^$' | while IFS='=' read -r k v; do
-		ensure_sysctl "$k" "$v"
+	__say "Configuring sysctl..."
+	printf '%s\n' "$NB_SYSCTLS" | grep -v -- '^$' | while IFS='=' read -r k v; do
+		__ensure_sysctl "$k" "$v"
 	done
 
 	# --- apply live ---
-	sysctl --system >/dev/null 2>&1 && say "  sysctl: settings applied" || \
-		say "  sysctl: --system apply failed, trying targeted apply"
+	sysctl --system >/dev/null 2>&1 && __say "  sysctl: settings applied" || \
+		__say "  sysctl: --system apply failed, trying targeted apply"
 	# Belt-and-suspenders: apply each key live even if --system failed
-	printf '%s\n' "$NB_SYSCTLS" | grep -v '^$' | while IFS='=' read -r k v; do
+	printf '%s\n' "$NB_SYSCTLS" | grep -v -- '^$' | while IFS='=' read -r k v; do
 		sysctl -w "${k}=${v}" >/dev/null 2>&1 || true
 	done
 }
@@ -409,19 +470,19 @@ configure_kernel() {
 #######################################
 # Host integration
 #######################################
-configure_host_integration() {
-	case "$(os_id)" in
+__configure_host_integration() {
+	case "$(__os_id)" in
 	almalinux | rocky | centos | rhel | ol)
-		need_cmd dnf
+		__need_cmd dnf
 		dnf -y install firewalld policycoreutils-python-utils container-selinux
 		systemctl enable --now firewalld
 		;;
 	esac
 
-	if have_cmd firewall-cmd; then
-		firewall_open_port "$NB_EXTERNAL_PORT/tcp"
-		firewall_open_port "$NB_TURN_PORT/udp"
-		firewall_open_port "$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT/udp"
+	if __have_cmd firewall-cmd; then
+		__firewall_open_port "$NB_EXTERNAL_PORT/tcp"
+		__firewall_open_port "$NB_TURN_PORT/udp"
+		__firewall_open_port "$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT/udp"
 		firewall-cmd --quiet --reload
 	fi
 }
@@ -429,30 +490,30 @@ configure_host_integration() {
 #######################################
 # Generate secrets and config
 #######################################
-ensure_runtime_secrets() {
-	ensure_secret_file "$KC_ADMIN_PASS_FILE" 24 "Keycloak admin password"
-	ensure_secret_file "$KC_DB_PASS_FILE" 32 "Keycloak database password"
-	ensure_secret_file "$TURN_PASS_FILE" 32 "TURN password"
-	ensure_datastore_key
-	ensure_value_file "$TURN_USER_FILE" "$TURN_USER_LOCAL" "TURN username"
+__ensure_runtime_secrets() {
+	__ensure_secret_file "$KC_ADMIN_PASS_FILE" 24 "Keycloak admin password"
+	__ensure_secret_file "$KC_DB_PASS_FILE" 32 "Keycloak database password"
+	__ensure_secret_file "$TURN_PASS_FILE" 32 "TURN password"
+	__ensure_datastore_key
+	__ensure_value_file "$TURN_USER_FILE" "$TURN_USER_LOCAL" "TURN username"
 }
 
-write_keycloak_env() {
+__write_keycloak_env() {
 	cat >"$KC_ENV_FILE" <<EOF
 # Autogenerated by install.sh
 TZ="$NB_TIMEZONE"
 
 POSTGRES_DB=keycloak
 POSTGRES_USER=keycloak
-POSTGRES_PASSWORD=$(read_value "$KC_DB_PASS_FILE")
+POSTGRES_PASSWORD=$(__read_value "$KC_DB_PASS_FILE")
 
 KC_DB=postgres
 KC_DB_URL=jdbc:postgresql://$KC_DB_SVC:5432/keycloak
 KC_DB_USERNAME=keycloak
-KC_DB_PASSWORD=$(read_value "$KC_DB_PASS_FILE")
+KC_DB_PASSWORD=$(__read_value "$KC_DB_PASS_FILE")
 
 KEYCLOAK_ADMIN=admin
-KEYCLOAK_ADMIN_PASSWORD=$(read_value "$KC_ADMIN_PASS_FILE")
+KEYCLOAK_ADMIN_PASSWORD=$(__read_value "$KC_ADMIN_PASS_FILE")
 
 KC_HOSTNAME=https://$NB_DOMAIN:$NB_EXTERNAL_PORT
 KC_HTTP_ENABLED=true
@@ -462,7 +523,7 @@ KC_HEALTH_ENABLED=true
 EOF
 }
 
-write_netbird_env() {
+__write_netbird_env() {
 	if [ -f "$NETBIRD_ENV_FILE" ]; then
 		return 0
 	fi
@@ -470,9 +531,9 @@ write_netbird_env() {
 # Autogenerated by install.sh
 TZ="$NB_TIMEZONE"
 
-NB_AUTH_ISSUER=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/realms/netbird
-NB_AUTH_OIDC_CONFIGURATION_ENDPOINT=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/realms/netbird/.well-known/openid-configuration
-NB_AUTH_TOKEN_ENDPOINT=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/realms/netbird/protocol/openid-connect/token
+NB_AUTH_ISSUER=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/realms/$NB_ORG
+NB_AUTH_OIDC_CONFIGURATION_ENDPOINT=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/realms/$NB_ORG/.well-known/openid-configuration
+NB_AUTH_TOKEN_ENDPOINT=https://$NB_DOMAIN:$NB_EXTERNAL_PORT/realms/$NB_ORG/protocol/openid-connect/token
 NB_AUTH_CLIENT_ID=$NB_AUTH_CLIENT_ID
 NB_AUTH_CLIENT_SECRET=$NB_AUTH_CLIENT_SECRET
 NB_IDP_MGMT_CLIENT_ID=$NB_IDP_MGMT_CLIENT_ID
@@ -485,7 +546,7 @@ NETBIRD_EMAIL_FROM="$NB_EMAIL_FROM_USER"
 EOF
 }
 
-write_dashboard_env() {
+__write_dashboard_env() {
 	cat >"$DASHBOARD_ENV_FILE" <<EOF
 # Autogenerated by install.sh
 NETBIRD_MGMT_API_ENDPOINT=https://$NB_DOMAIN:$NB_EXTERNAL_PORT
@@ -502,7 +563,7 @@ NGINX_SSL_PORT=$NB_EXTERNAL_PORT
 EOF
 }
 
-write_turnserver_conf() {
+__write_turnserver_conf() {
 	cat >"$TURN_CONF_FILE" <<EOF
 # Autogenerated by install.sh
 listening-port=$NB_TURN_PORT
@@ -515,12 +576,12 @@ stale-nonce=600
 no-cli
 no-loopback-peers
 no-multicast-peers
-user=$(read_value "$TURN_USER_FILE"):$(read_value "$TURN_PASS_FILE")
+user=$(__read_value "$TURN_USER_FILE"):$(__read_value "$TURN_PASS_FILE")
 log-file=stdout
 EOF
 }
 
-write_management_json() {
+__write_management_json() {
 	cat >"$MGMT_JSON_FILE" <<EOF
 {
   "Stuns": [
@@ -536,12 +597,12 @@ write_management_json() {
       {
         "Proto": "udp",
         "URI": "turn:$NB_DOMAIN:$NB_TURN_PORT",
-        "Username": "$(read_value "$TURN_USER_FILE")",
-        "Password": "$(read_value "$TURN_PASS_FILE")"
+        "Username": "$(__read_value "$TURN_USER_FILE")",
+        "Password": "$(__read_value "$TURN_PASS_FILE")"
       }
     ],
     "CredentialsTTL": "12h",
-    "Secret": "$(read_value "$TURN_PASS_FILE")",
+    "Secret": "$(__read_value "$TURN_PASS_FILE")",
     "TimeBasedCredentials": false
   },
   "Signal": {
@@ -557,25 +618,25 @@ write_management_json() {
       "0.0.0.0/0"
     ]
   },
-  "DataStoreEncryptionKey": "$(read_value "$DATASTORE_KEY_FILE")",
+  "DataStoreEncryptionKey": "$(__read_value "$DATASTORE_KEY_FILE")",
   "HttpConfig": {
     "Address": "0.0.0.0:8080",
     "AuthIssuer": "$NB_AUTH_ISSUER",
     "AuthAudience": "$NB_AUTH_CLIENT_ID",
-    "AuthKeysLocation": "http://$KC_SVC:8080/realms/netbird/protocol/openid-connect/certs",
+    "AuthKeysLocation": "http://$KC_SVC:8080/realms/$NB_ORG/protocol/openid-connect/certs",
     "IdpSignKeyRefreshEnabled": true
   },
   "IdpManagerConfig": {
     "ManagerType": "keycloak",
     "ClientConfig": {
       "Issuer": "$NB_AUTH_ISSUER",
-      "TokenEndpoint": "http://$KC_SVC:8080/realms/netbird/protocol/openid-connect/token",
+      "TokenEndpoint": "http://$KC_SVC:8080/realms/$NB_ORG/protocol/openid-connect/token",
       "ClientID": "$NB_IDP_MGMT_CLIENT_ID",
       "ClientSecret": "$NB_IDP_MGMT_CLIENT_SECRET",
       "GrantType": "client_credentials"
     },
     "ExtraConfig": {
-      "AdminEndpoint": "http://$KC_SVC:8080/admin/realms/netbird"
+      "AdminEndpoint": "http://$KC_SVC:8080/admin/realms/$NB_ORG"
     }
   },
   "PKCEAuthorizationFlow": {
@@ -597,9 +658,9 @@ write_management_json() {
 EOF
 }
 
-write_compose() {
-	rw_opts="$(bind_rw_opts)"
-	ro_opts="$(bind_ro_opts)"
+__write_compose() {
+	rw_opts="$(__bind_rw_opts)"
+	ro_opts="$(__bind_ro_opts)"
 	cat >"$DC_FILE" <<EOF
 # Autogenerated by install.sh — NetBird self-hosted stack
 name: netbird
@@ -617,6 +678,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   $KC_SVC:
     image: quay.io/keycloak/keycloak:26.2
@@ -639,6 +705,11 @@ services:
       timeout: 10s
       retries: 30
       start_period: 300s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   $TURN_SVC:
     image: docker.io/coturn/coturn:latest
@@ -650,6 +721,11 @@ services:
     volumes:
       - $TURN_CONF_FILE:/etc/turnserver.conf:$ro_opts
       - $TURN_DATA:/var/lib/coturn:$rw_opts
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   $MGMT_SVC:
     image: docker.io/netbirdio/management:latest
@@ -685,6 +761,11 @@ services:
     ports:
       - 127.0.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT:8080
     networks: [$NB_DOCKER_NETWORK]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   $DASH_SVC:
     image: docker.io/netbirdio/dashboard:latest
@@ -696,6 +777,11 @@ services:
     ports:
       - 127.0.0.1:$NB_DASHBOARD_BACKEND_PORT:80
     networks: [$NB_DOCKER_NETWORK]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   $SIG_SVC:
     image: docker.io/netbirdio/signal:latest
@@ -708,6 +794,11 @@ services:
     ports:
       - 127.0.0.1:$NB_SIGNAL_BACKEND_PORT:10000
     networks: [$NB_DOCKER_NETWORK]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   $NB_DOCKER_NETWORK:
@@ -719,7 +810,7 @@ EOF
 #######################################
 # Validation and admin bootstrap
 #######################################
-validate_compose_definition() {
+__validate_compose_definition() {
 	(
 		cd "$NB_COMPOSE"
 		set -a
@@ -730,8 +821,8 @@ validate_compose_definition() {
 	)
 }
 
-validate_running_services() {
-	say "Waiting for all services to reach running state (up to 5 minutes)..."
+__validate_running_services() {
+	__say "Waiting for all services to reach running state (up to 5 minutes)..."
 	attempt=1
 	while [ "$attempt" -le 60 ]; do
 		all_running=1
@@ -749,31 +840,31 @@ validate_running_services() {
 	# Final pass — report which service(s) failed
 	running_services="$(docker compose -f "$DC_FILE" ps --services --status running 2>/dev/null)"
 	for service in "$KC_DB_SVC" "$KC_SVC" "$TURN_SVC" "$MGMT_SVC" "$DASH_SVC" "$SIG_SVC"; do
-		printf '%s\n' "$running_services" | grep -qx -- "$service" || die "service did not reach running state: $service"
+		printf '%s\n' "$running_services" | grep -qx -- "$service" || __die "service did not reach running state: $service"
 	done
 }
 
-ensure_admin_user() {
-	say "Keycloak admin credentials:"
-	say "  URL:      https://$NB_DOMAIN:$NB_EXTERNAL_PORT"
-	say "  Username: admin"
-	say "  Password: see $KC_ADMIN_PASS_FILE"
+__ensure_admin_user() {
+	__say "Keycloak admin credentials:"
+	__say "  URL:      https://$NB_DOMAIN:$NB_EXTERNAL_PORT"
+	__say "  Username: admin"
+	__say "  Password: see $KC_ADMIN_PASS_FILE"
 }
 
-# auto_configure_oidc — uses the Keycloak admin REST API to create the netbird
+# __auto_configure_oidc — uses the Keycloak admin REST API to create the netbird
 # realm, PKCE client, and management service account automatically.
 # Runs only when netbird.env still contains placeholder credentials.
 # On subsequent runs this function is a no-op.
-auto_configure_oidc() {
+__auto_configure_oidc() {
 	# Already configured — nothing to do
 	if ! grep -q -- 'replace-me' "$NETBIRD_ENV_FILE" 2>/dev/null; then
 		return 0
 	fi
 
-	say "Auto-configuring Keycloak OIDC for NetBird..."
+	__say "Auto-configuring Keycloak OIDC for NetBird..."
 
 	kc_url="http://127.0.0.1:$NB_KC_BACKEND_PORT"
-	kc_admin_pass="$(read_value "$KC_ADMIN_PASS_FILE")"
+	kc_admin_pass="$(__read_value "$KC_ADMIN_PASS_FILE")"
 
 	# ------------------------------------------------------------------
 	# 1. Obtain admin token from master realm
@@ -784,10 +875,10 @@ auto_configure_oidc() {
 		--data-urlencode "username=admin" \
 		--data-urlencode "password=$kc_admin_pass" \
 		"$kc_url/realms/master/protocol/openid-connect/token") \
-		|| die "OIDC setup: failed to obtain Keycloak admin token"
+		|| __die "OIDC setup: failed to obtain Keycloak admin token"
 	admin_token=$(printf '%s' "$token_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"], end="")')
-	[ -n "$admin_token" ] || die "OIDC setup: empty admin token"
-	say "  Keycloak admin token obtained"
+	[ -n "$admin_token" ] || __die "OIDC setup: empty admin token"
+	__say "  Keycloak admin token obtained"
 
 	# ------------------------------------------------------------------
 	# 2. Create netbird realm
@@ -795,10 +886,10 @@ auto_configure_oidc() {
 	curl -sSf -X POST \
 		-H "Authorization: Bearer $admin_token" \
 		-H "Content-Type: application/json" \
-		-d '{"realm":"netbird","enabled":true,"displayName":"NetBird","registrationAllowed":true,"resetPasswordAllowed":true}' \
+		-d "{\"realm\":\"$NB_ORG\",\"enabled\":true,\"displayName\":\"NetBird\",\"registrationAllowed\":true,\"resetPasswordAllowed\":true}" \
 		"$kc_url/admin/realms" >/dev/null \
-		|| say "  Note: netbird realm may already exist, continuing..."
-	say "  Realm 'netbird' ensured"
+		|| __say "  Note: $NB_ORG realm may already exist, continuing..."
+	__say "  Realm '$NB_ORG' ensured"
 
 	# ------------------------------------------------------------------
 	# 3. Create PKCE public client (for end users / NetBird CLI / dashboard)
@@ -806,10 +897,11 @@ auto_configure_oidc() {
 	curl -sSf -X POST \
 		-H "Authorization: Bearer $admin_token" \
 		-H "Content-Type: application/json" \
-		-d '{"clientId":"netbird-client","enabled":true,"publicClient":true,"standardFlowEnabled":true,"directAccessGrantsEnabled":false,"redirectUris":["http://localhost:53000/*","http://localhost:54000/*"],"webOrigins":["+"]}' \
-		"$kc_url/admin/realms/netbird/clients" >/dev/null \
-		|| say "  Note: netbird-client may already exist, continuing..."
-	say "  PKCE client 'netbird-client' ensured"
+		-d '{"clientId":"netbird-client","enabled":true,"publicClient":true,"standardFlowEnabled":true,'\
+'"directAccessGrantsEnabled":false,"redirectUris":["http://localhost:53000/*","http://localhost:54000/*"],"webOrigins":["+"]}' \
+		"$kc_url/admin/realms/$NB_ORG/clients" >/dev/null \
+		|| __say "  Note: netbird-client may already exist, continuing..."
+	__say "  PKCE client 'netbird-client' ensured"
 
 	# ------------------------------------------------------------------
 	# 4. Add audience mapper to netbird-client so access tokens contain
@@ -817,17 +909,18 @@ auto_configure_oidc() {
 	# ------------------------------------------------------------------
 	nb_client_uuid=$(curl -sSf \
 		-H "Authorization: Bearer $admin_token" \
-		"$kc_url/admin/realms/netbird/clients?clientId=netbird-client" \
+		"$kc_url/admin/realms/$NB_ORG/clients?clientId=netbird-client" \
 		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
-	[ -n "$nb_client_uuid" ] || die "OIDC setup: could not find netbird-client UUID"
+	[ -n "$nb_client_uuid" ] || __die "OIDC setup: could not find netbird-client UUID"
 
 	curl -sSf -X POST \
 		-H "Authorization: Bearer $admin_token" \
 		-H "Content-Type: application/json" \
-		-d '{"name":"netbird-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper","config":{"id.token.claim":"false","access.token.claim":"true","included.client.audience":"netbird-client"}}' \
-		"$kc_url/admin/realms/netbird/clients/$nb_client_uuid/protocol-mappers/models" >/dev/null \
-		|| say "  Note: audience mapper may already exist, continuing..."
-	say "  Audience mapper added to netbird-client"
+		-d '{"name":"netbird-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper",'\
+'"config":{"id.token.claim":"false","access.token.claim":"true","included.client.audience":"netbird-client"}}' \
+		"$kc_url/admin/realms/$NB_ORG/clients/$nb_client_uuid/protocol-mappers/models" >/dev/null \
+		|| __say "  Note: audience mapper may already exist, continuing..."
+	__say "  Audience mapper added to netbird-client"
 
 	# ------------------------------------------------------------------
 	# 5. Create confidential service account client (for management backend)
@@ -836,25 +929,25 @@ auto_configure_oidc() {
 		-H "Authorization: Bearer $admin_token" \
 		-H "Content-Type: application/json" \
 		-d '{"clientId":"netbird-management","enabled":true,"publicClient":false,"serviceAccountsEnabled":true,"standardFlowEnabled":false,"clientAuthenticatorType":"client-secret"}' \
-		"$kc_url/admin/realms/netbird/clients" >/dev/null \
-		|| say "  Note: netbird-management client may already exist, continuing..."
-	say "  Service account client 'netbird-management' ensured"
+		"$kc_url/admin/realms/$NB_ORG/clients" >/dev/null \
+		|| __say "  Note: netbird-management client may already exist, continuing..."
+	__say "  Service account client 'netbird-management' ensured"
 
 	# ------------------------------------------------------------------
 	# 6. Fetch management client UUID and regenerate secret
 	# ------------------------------------------------------------------
 	mgmt_uuid=$(curl -sSf \
 		-H "Authorization: Bearer $admin_token" \
-		"$kc_url/admin/realms/netbird/clients?clientId=netbird-management" \
+		"$kc_url/admin/realms/$NB_ORG/clients?clientId=netbird-management" \
 		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
-	[ -n "$mgmt_uuid" ] || die "OIDC setup: could not find netbird-management UUID"
+	[ -n "$mgmt_uuid" ] || __die "OIDC setup: could not find netbird-management UUID"
 
 	secret_resp=$(curl -sSf -X POST \
 		-H "Authorization: Bearer $admin_token" \
-		"$kc_url/admin/realms/netbird/clients/$mgmt_uuid/client-secret")
+		"$kc_url/admin/realms/$NB_ORG/clients/$mgmt_uuid/client-secret")
 	mgmt_secret=$(printf '%s' "$secret_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"], end="")')
-	[ -n "$mgmt_secret" ] || die "OIDC setup: could not obtain management client secret"
-	say "  Management client secret generated"
+	[ -n "$mgmt_secret" ] || __die "OIDC setup: could not obtain management client secret"
+	__say "  Management client secret generated"
 
 	# ------------------------------------------------------------------
 	# 7. Grant realm-admin role to the management service account so it
@@ -862,28 +955,28 @@ auto_configure_oidc() {
 	# ------------------------------------------------------------------
 	sa_user_id=$(curl -sSf \
 		-H "Authorization: Bearer $admin_token" \
-		"$kc_url/admin/realms/netbird/clients/$mgmt_uuid/service-account-user" \
+		"$kc_url/admin/realms/$NB_ORG/clients/$mgmt_uuid/service-account-user" \
 		| python3 -c 'import sys,json; print(json.load(sys.stdin)["id"], end="")')
-	[ -n "$sa_user_id" ] || die "OIDC setup: could not find service account user ID"
+	[ -n "$sa_user_id" ] || __die "OIDC setup: could not find service account user ID"
 
 	rm_uuid=$(curl -sSf \
 		-H "Authorization: Bearer $admin_token" \
-		"$kc_url/admin/realms/netbird/clients?clientId=realm-management" \
+		"$kc_url/admin/realms/$NB_ORG/clients?clientId=realm-management" \
 		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
-	[ -n "$rm_uuid" ] || die "OIDC setup: could not find realm-management client UUID"
+	[ -n "$rm_uuid" ] || __die "OIDC setup: could not find realm-management client UUID"
 
 	realm_admin_role=$(curl -sSf \
 		-H "Authorization: Bearer $admin_token" \
-		"$kc_url/admin/realms/netbird/clients/$rm_uuid/roles/realm-admin")
-	[ -n "$realm_admin_role" ] || die "OIDC setup: could not fetch realm-admin role"
+		"$kc_url/admin/realms/$NB_ORG/clients/$rm_uuid/roles/realm-admin")
+	[ -n "$realm_admin_role" ] || __die "OIDC setup: could not fetch realm-admin role"
 
 	curl -sSf -X POST \
 		-H "Authorization: Bearer $admin_token" \
 		-H "Content-Type: application/json" \
 		-d "[$realm_admin_role]" \
-		"$kc_url/admin/realms/netbird/users/$sa_user_id/role-mappings/clients/$rm_uuid" >/dev/null \
-		|| say "  Note: realm-admin role may already be assigned, continuing..."
-	say "  realm-admin role assigned to netbird-management service account"
+		"$kc_url/admin/realms/$NB_ORG/users/$sa_user_id/role-mappings/clients/$rm_uuid" >/dev/null \
+		|| __say "  Note: realm-admin role may already be assigned, continuing..."
+	__say "  realm-admin role assigned to netbird-management service account"
 
 	# ------------------------------------------------------------------
 	# 8. Update netbird.env with the real credentials
@@ -894,31 +987,31 @@ auto_configure_oidc() {
 		-e "s|^NB_IDP_MGMT_CLIENT_ID=.*|NB_IDP_MGMT_CLIENT_ID=netbird-management|" \
 		-e "s|^NB_IDP_MGMT_CLIENT_SECRET=.*|NB_IDP_MGMT_CLIENT_SECRET=$mgmt_secret|" \
 		"$NETBIRD_ENV_FILE"
-	say "  Updated $NETBIRD_ENV_FILE with Keycloak credentials"
-	say "OIDC auto-configuration complete."
+	__say "  Updated $NETBIRD_ENV_FILE with Keycloak credentials"
+	__say "OIDC auto-configuration complete."
 }
 
 #######################################
 # Main flow
 #######################################
-configure_kernel
-install_docker
-configure_host_integration
-ensure_runtime_secrets
+__configure_kernel
+__install_docker
+__configure_host_integration
+__ensure_runtime_secrets
 
-write_keycloak_env
-write_netbird_env
+__write_keycloak_env
+__write_netbird_env
 
 set -a
 . "$KC_ENV_FILE"
 . "$NETBIRD_ENV_FILE"
 set +a
 
-write_dashboard_env
-write_turnserver_conf
-write_management_json
-write_compose
-validate_compose_definition
+__write_dashboard_env
+__write_turnserver_conf
+__write_management_json
+__write_compose
+__validate_compose_definition
 
 (
 	cd "$NB_COMPOSE"
@@ -930,21 +1023,21 @@ validate_compose_definition
 	docker compose up -d
 )
 
-validate_running_services
-wait_for_http "http://127.0.0.1:$NB_KC_MGMT_PORT/health/ready" "Keycloak"
-wait_for_http "http://127.0.0.1:$NB_DASHBOARD_BACKEND_PORT/" "NetBird dashboard"
+__validate_running_services
+__wait_for_http "http://127.0.0.1:$NB_KC_MGMT_PORT/health/ready" "Keycloak"
+__wait_for_http "http://127.0.0.1:$NB_DASHBOARD_BACKEND_PORT/" "NetBird dashboard"
 
 # Auto-configure Keycloak OIDC on first install (no-op on reruns)
-auto_configure_oidc
+__auto_configure_oidc
 
 # If OIDC was just configured, reload env and rewrite + restart affected services
-if ! grep -q 'replace-me' "$NETBIRD_ENV_FILE" 2>/dev/null; then
+if ! grep -q -- 'replace-me' "$NETBIRD_ENV_FILE" 2>/dev/null; then
 	set -a
 	. "$NETBIRD_ENV_FILE"
 	set +a
 	# Rewrite configs that embed the client IDs
-	write_dashboard_env
-	write_management_json
+	__write_dashboard_env
+	__write_management_json
 	(
 		cd "$NB_COMPOSE"
 		set -a
@@ -953,7 +1046,7 @@ if ! grep -q 'replace-me' "$NETBIRD_ENV_FILE" 2>/dev/null; then
 		set +a
 		docker compose up -d --force-recreate "$MGMT_SVC" "$DASH_SVC"
 	)
-	say "Waiting for management and dashboard to restart with real OIDC config..."
+	__say "Waiting for management and dashboard to restart with real OIDC config..."
 	attempt=1
 	while [ "$attempt" -le 30 ]; do
 		running="$(docker compose -f "$DC_FILE" ps --services --status running 2>/dev/null)"
@@ -965,7 +1058,7 @@ if ! grep -q 'replace-me' "$NETBIRD_ENV_FILE" 2>/dev/null; then
 	done
 fi
 
-ensure_admin_user
+__ensure_admin_user
 
 cat <<OUT
 
@@ -976,7 +1069,7 @@ Host integration:
   - Kernel modules:   $NB_MODULES_FILE
   - sysctl drop-in:   $NB_SYSCTL_FILE
   - Firewalld opened: tcp/$NB_EXTERNAL_PORT, udp/$NB_TURN_PORT, udp/$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT
-  - SELinux bind relabeling: $(if selinux_enabled; then printf 'enabled'; else printf 'not required'; fi)
+  - SELinux bind relabeling: $(if __selinux_enabled; then printf 'enabled'; else printf 'not required'; fi)
 
 Local reverse-proxy backends:
   - Dashboard root                          -> http://127.0.0.1:$NB_DASHBOARD_BACKEND_PORT

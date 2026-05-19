@@ -7,7 +7,8 @@
       "Bash(modinfo wireguard *)",
       "Read(//run/incus/netbird-beta/**)",
       "Read(//var/lib/incus/storage-pools/default/containers/netbird-beta/**)",
-      "Bash(lxc-stop -n \"netbird-beta\" -k)"
+      "Bash(lxc-stop -n \"netbird-beta\" -k)",
+      "Read(//root/.claude/memory/**)"
     ]
   }
 }

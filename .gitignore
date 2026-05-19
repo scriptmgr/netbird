@@ -100,4 +100,7 @@ $RECYCLE.BIN/
 **/*.rewrite.sh
 **/*.refactor.sh
 
+# site-specific installer overrides (contains personal values)
+.env
+
 
