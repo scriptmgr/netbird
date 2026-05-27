@@ -363,8 +363,8 @@ chmod 700 "$NB_SECRETS"
 __install_docker() {
 	if __have_cmd docker && docker compose version >/dev/null 2>&1; then
 		__say "Docker and Compose plugin already present — skipping installation."
-		systemctl is-enabled docker >/dev/null 2>&1 || systemctl enable docker
-		systemctl is-active docker >/dev/null 2>&1 || systemctl start docker
+		systemctl is-enabled docker >/dev/null 2>&1 || systemctl enable docker 2>/dev/null || __say "Warning: could not enable docker service — continuing (it is already running)"
+		systemctl is-active docker >/dev/null 2>&1 || systemctl start docker 2>/dev/null || __say "Warning: could not start docker service — continuing"
 		return 0
 	fi
 
@@ -394,7 +394,7 @@ __install_docker() {
 				"$arch" "$linux_id" "$codename" >/etc/apt/sources.list.d/docker.list
 			apt-get update -y
 			apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-			systemctl enable --now docker
+			systemctl enable --now docker 2>/dev/null || __say "Warning: could not enable/start docker via systemctl — continuing"
 			;;
 		fedora)
 			__need_cmd dnf
@@ -402,7 +402,7 @@ __install_docker() {
 			dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
 			dnf -y remove containerd 2>/dev/null || true
 			dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-			systemctl enable --now docker
+			systemctl enable --now docker 2>/dev/null || __say "Warning: could not enable/start docker via systemctl — continuing"
 			;;
 		almalinux | rocky | centos | rhel | ol)
 			__need_cmd dnf
@@ -410,13 +410,13 @@ __install_docker() {
 			dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
 			dnf -y remove containerd 2>/dev/null || true
 			dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-			systemctl enable --now docker
+			systemctl enable --now docker 2>/dev/null || __say "Warning: could not enable/start docker via systemctl — continuing"
 			;;
 		opensuse* | sles)
 			__need_cmd zypper
 			zypper refresh
 			zypper -n install docker docker-compose
-			systemctl enable --now docker
+			systemctl enable --now docker 2>/dev/null || __say "Warning: could not enable/start docker via systemctl — continuing"
 			# Distro docker-compose may be a standalone binary, not a CLI plugin.
 			# Symlink it into the CLI plugin directory so 'docker compose' works.
 			mkdir -p /usr/lib/docker/cli-plugins
@@ -427,7 +427,7 @@ __install_docker() {
 		arch | manjaro | endeavouros | arcolinux)
 			__need_cmd pacman
 			pacman -Sy --noconfirm docker docker-compose
-			systemctl enable --now docker
+			systemctl enable --now docker 2>/dev/null || __say "Warning: could not enable/start docker via systemctl — continuing"
 			# Same as openSUSE: ensure the CLI plugin path is populated.
 			mkdir -p /usr/lib/docker/cli-plugins
 			if [ ! -f /usr/lib/docker/cli-plugins/docker-compose ] && __have_cmd docker-compose; then
@@ -446,8 +446,8 @@ __install_docker() {
 
 	__have_cmd docker || __die "Docker not installed"
 	docker compose version >/dev/null 2>&1 || __die "Docker Compose plugin not found (docker compose)."
-	systemctl is-enabled docker >/dev/null 2>&1 || systemctl enable docker
-	systemctl is-active docker >/dev/null 2>&1 || systemctl start docker
+	systemctl is-enabled docker >/dev/null 2>&1 || systemctl enable docker 2>/dev/null || __say "Warning: could not enable docker service — continuing"
+	systemctl is-active docker >/dev/null 2>&1 || systemctl start docker 2>/dev/null || __say "Warning: could not start docker service — continuing"
 }
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -552,7 +552,7 @@ __configure_host_integration() {
 	almalinux | rocky | centos | rhel | ol)
 		__need_cmd dnf
 		dnf -y install firewalld policycoreutils-python-utils container-selinux
-		systemctl enable --now firewalld
+		systemctl enable --now firewalld 2>/dev/null || __say "Warning: could not enable/start firewalld — continuing"
 		if __selinux_enabled; then
 			setsebool -P httpd_can_network_connect 1
 			__say "SELinux: httpd_can_network_connect enabled (nginx → upstream proxying)"
