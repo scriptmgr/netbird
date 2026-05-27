@@ -709,7 +709,7 @@ services:
       - 127.0.0.1:$NB_KC_MGMT_PORT:9000
     networks: [$NB_DOCKER_NETWORK]
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && printf 'GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '200' <&3"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && printf 'GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q -- '200' <&3"]
       interval: 15s
       timeout: 10s
       retries: 30
@@ -814,6 +814,22 @@ networks:
     name: $NB_DOCKER_NETWORK
     driver: bridge
 EOF
+}
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+# Add the Docker bridge subnet to firewalld's trusted zone so containers
+# on the same bridge can reach each other. Firewalld's FORWARD chain
+# otherwise rejects intra-bridge traffic (only oifname "eth0" is allowed
+# in the public zone). Must run after "docker compose up" creates the network.
+__configure_docker_firewalld() {
+	__have_cmd firewall-cmd || return 0
+	nb_subnet=$(docker network inspect "$NB_DOCKER_NETWORK" \
+		--format='{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null) || return 0
+	[ -n "$nb_subnet" ] || return 0
+	firewall-cmd --quiet --zone=trusted --add-source="$nb_subnet" 2>/dev/null || true
+	firewall-cmd --quiet --permanent --zone=trusted --add-source="$nb_subnet" 2>/dev/null || true
+	firewall-cmd --quiet --reload 2>/dev/null || true
+	__say "Firewall: Docker network subnet $nb_subnet added to trusted zone"
 }
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -1030,6 +1046,7 @@ __validate_compose_definition
 	docker compose up -d
 )
 
+__configure_docker_firewalld
 __validate_running_services
 __wait_for_http "http://127.0.0.1:$NB_KC_MGMT_PORT/health/ready" "Keycloak"
 __wait_for_http "http://127.0.0.1:$NB_DASHBOARD_BACKEND_PORT/" "NetBird dashboard"
