@@ -491,6 +491,10 @@ __configure_host_integration() {
 		__need_cmd dnf
 		dnf -y install firewalld policycoreutils-python-utils container-selinux
 		systemctl enable --now firewalld
+		if __selinux_enabled; then
+			setsebool -P httpd_can_network_connect 1
+			__say "SELinux: httpd_can_network_connect enabled (nginx → upstream proxying)"
+		fi
 		;;
 	esac
 
