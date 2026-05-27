@@ -1053,8 +1053,8 @@ __auto_configure_oidc() {
 	curl -sSf -X POST \
 		-H "Authorization: Bearer $admin_token" \
 		-H "Content-Type: application/json" \
-		-d '{"clientId":"netbird-client","enabled":true,"publicClient":true,"standardFlowEnabled":true,'\
-'"directAccessGrantsEnabled":false,"redirectUris":["http://localhost:53000/*","http://localhost:54000/*"],"webOrigins":["+"]}' \
+		-d "{\"clientId\":\"netbird-client\",\"enabled\":true,\"publicClient\":true,\"standardFlowEnabled\":true,"\
+"\"directAccessGrantsEnabled\":false,\"redirectUris\":[\"http://localhost:53000/*\",\"http://localhost:54000/*\",\"https://$NB_DOMAIN/*\"],\"webOrigins\":[\"+\"]}" \
 		"$kc_url/admin/realms/$NB_ORG/clients" >/dev/null \
 		|| __say "  Note: netbird-client may already exist, continuing..."
 	__say "  PKCE client 'netbird-client' ensured"
@@ -1068,6 +1068,15 @@ __auto_configure_oidc() {
 		"$kc_url/admin/realms/$NB_ORG/clients?clientId=netbird-client" \
 		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
 	[ -n "$nb_client_uuid" ] || __die "OIDC setup: could not find netbird-client UUID"
+
+	# Ensure redirect URIs include the domain even when the client already existed
+	curl -sSf -X PUT \
+		-H "Authorization: Bearer $admin_token" \
+		-H "Content-Type: application/json" \
+		-d "{\"clientId\":\"netbird-client\",\"enabled\":true,\"publicClient\":true,\"standardFlowEnabled\":true,"\
+"\"directAccessGrantsEnabled\":false,\"redirectUris\":[\"http://localhost:53000/*\",\"http://localhost:54000/*\",\"https://$NB_DOMAIN/*\"],\"webOrigins\":[\"+\"]}" \
+		"$kc_url/admin/realms/$NB_ORG/clients/$nb_client_uuid" >/dev/null \
+		&& __say "  netbird-client redirect URIs patched (https://$NB_DOMAIN/*)"
 
 	curl -sSf -X POST \
 		-H "Authorization: Bearer $admin_token" \
