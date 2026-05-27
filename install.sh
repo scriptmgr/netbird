@@ -297,8 +297,11 @@ chmod 700 "$NB_SECRETS"
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # Install/Upgrade Docker Engine (official repos)
 __install_docker() {
-	if __have_cmd docker; then
-		__say "Docker already present. Ensuring Compose plugin is available..."
+	if __have_cmd docker && docker compose version >/dev/null 2>&1; then
+		__say "Docker and Compose plugin already present — skipping installation."
+		systemctl is-enabled docker >/dev/null 2>&1 || systemctl enable docker
+		systemctl is-active docker >/dev/null 2>&1 || systemctl start docker
+		return 0
 	fi
 
 	case "$(uname -s)" in
