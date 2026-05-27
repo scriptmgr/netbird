@@ -1001,7 +1001,58 @@ __validate_running_services() {
 }
 
 __ensure_admin_user() {
-	__say "Keycloak admin credentials:"
+	kc_url="http://127.0.0.1:$NB_KC_BACKEND_PORT"
+	kc_admin_pass="$(__read_value "$KC_ADMIN_PASS_FILE")"
+
+	# Obtain a short-lived admin token from the master realm
+	_ea_token=$(curl -s \
+		--data-urlencode "grant_type=password" \
+		--data-urlencode "client_id=admin-cli" \
+		--data-urlencode "username=admin" \
+		--data-urlencode "password=$kc_admin_pass" \
+		"$kc_url/realms/master/protocol/openid-connect/token" \
+		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""), end="")')
+
+	if [ -z "$_ea_token" ]; then
+		__say "WARNING: could not obtain Keycloak admin token — skipping admin user creation"
+		__say "  Create an admin user manually at https://$NB_DOMAIN:$NB_EXTERNAL_PORT/admin"
+		return 0
+	fi
+
+	# Check whether the admin user already exists
+	_ea_existing=$(curl -s \
+		-H "Authorization: Bearer $_ea_token" \
+		"$kc_url/admin/realms/$NB_ORG/users?username=admin" \
+		| python3 -c 'import sys,json; u=json.load(sys.stdin); print(u[0]["id"] if u else "", end="")')
+
+	if [ -n "$_ea_existing" ]; then
+		__say "Keycloak: realm admin user already exists — skipping creation"
+	else
+		# Create the admin user in the NetBird realm
+		curl -sSf -X POST \
+			-H "Authorization: Bearer $_ea_token" \
+			-H "Content-Type: application/json" \
+			-d '{"username":"admin","enabled":true,"emailVerified":true}' \
+			"$kc_url/admin/realms/$NB_ORG/users" >/dev/null \
+			|| __die "Failed to create admin user in Keycloak realm $NB_ORG"
+
+		_ea_uuid=$(curl -s \
+			-H "Authorization: Bearer $_ea_token" \
+			"$kc_url/admin/realms/$NB_ORG/users?username=admin" \
+			| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
+		[ -n "$_ea_uuid" ] || __die "Admin user created but UUID not found"
+
+		curl -sSf -X PUT \
+			-H "Authorization: Bearer $_ea_token" \
+			-H "Content-Type: application/json" \
+			-d "{\"type\":\"password\",\"value\":\"$kc_admin_pass\",\"temporary\":false}" \
+			"$kc_url/admin/realms/$NB_ORG/users/$_ea_uuid/reset-password" >/dev/null \
+			|| __die "Failed to set admin user password"
+
+		__say "Keycloak: admin user created in realm $NB_ORG"
+	fi
+
+	__say "NetBird dashboard credentials:"
 	__say "  URL:      https://$NB_DOMAIN:$NB_EXTERNAL_PORT"
 	__say "  Username: admin"
 	__say "  Password: see $KC_ADMIN_PASS_FILE"
