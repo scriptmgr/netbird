@@ -1251,11 +1251,35 @@ __auto_configure_oidc() {
 	__say "OIDC auto-configuration complete."
 }
 
-# __ensure_tls_cert — generate a 20-year self-signed cert when no cert exists.
-# Skipped silently when both NB_SSL_CERT and NB_SSL_KEY already exist.
+# __ensure_tls_cert — resolve the TLS certificate to use for nginx.
+# Priority: 1) any existing Let's Encrypt cert that covers NB_DOMAIN
+#           2) NB_SSL_CERT/NB_SSL_KEY if they already exist
+#           3) generate a 20-year self-signed cert at the default paths
+# Sets NB_SSL_CERT and NB_SSL_KEY in the current shell so __write_nginx_vhost
+# picks up the correct paths regardless of what the defaults were.
 __ensure_tls_cert() {
-	[ -f "$NB_SSL_CERT" ] && [ -f "$NB_SSL_KEY" ] && return 0
 	__need_cmd openssl
+
+	# Scan all Live LE dirs; use first cert that covers NB_DOMAIN
+	if [ -d /etc/letsencrypt/live ]; then
+		for _le_cert in /etc/letsencrypt/live/*/fullchain.pem; do
+			[ -f "$_le_cert" ] || continue
+			_le_key="${_le_cert%fullchain.pem}privkey.pem"
+			[ -f "$_le_key" ] || continue
+			if openssl x509 -noout -text -in "$_le_cert" 2>/dev/null \
+			   | grep -qE -- "(CN=|DNS:).*$NB_DOMAIN"; then
+				NB_SSL_CERT="$_le_cert"
+				NB_SSL_KEY="$_le_key"
+				__say "TLS: using Let's Encrypt certificate -> $NB_SSL_CERT"
+				return 0
+			fi
+		done
+	fi
+
+	# No LE cert — use existing files if present
+	[ -f "$NB_SSL_CERT" ] && [ -f "$NB_SSL_KEY" ] && return 0
+
+	# Fall back to self-signed
 	mkdir -p "$(dirname -- "$NB_SSL_CERT")" "$(dirname -- "$NB_SSL_KEY")"
 	openssl req -x509 -newkey rsa:4096 -sha256 -days 7300 -nodes \
 		-keyout "$NB_SSL_KEY" \
