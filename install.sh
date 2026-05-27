@@ -31,6 +31,37 @@ SCRIPT_SRC_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 set -eu
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
+# Argument handling
+case "${1:-}" in
+--help|-h)
+    printf 'Usage: %s [--help|--version]\n\n' "$APPNAME"
+    printf 'NetBird self-hosted stack installer and updater.\n\n'
+    printf 'Run as root with no arguments to install or update the stack.\n'
+    printf 'Override defaults via environment variables or a .env file next to this script.\n\n'
+    printf 'Key environment variables:\n'
+    printf '  NB_DOMAIN            FQDN for the stack (default: auto-detected)\n'
+    printf '  NB_ROOT              Install root (default: /opt/netbird)\n'
+    printf '  NB_ORG               Keycloak realm name (default: netbird)\n'
+    printf '  NB_EXTERNAL_PORT     Public HTTPS port (default: 443)\n'
+    printf '  NB_TURN_PORT         TURN UDP port (default: 3478)\n'
+    printf '  NB_VERSION           NetBird version tag (default: %s)\n' "${NB_VERSION:-0.71.4}"
+    printf '  NB_DASHBOARD_VERSION Dashboard version tag (default: %s)\n' "${NB_DASHBOARD_VERSION:-v2.38.1}"
+    printf '\nSee README.md for full documentation.\n'
+    exit 0
+    ;;
+--version|-v)
+    printf '%s %s\n' "$APPNAME" "$VERSION"
+    exit 0
+    ;;
+'') ;;
+*)
+    printf '%s: unknown option: %s\n' "$APPNAME" "$1" >&2
+    printf 'Run %s --help for usage.\n' "$APPNAME" >&2
+    exit 2
+    ;;
+esac
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Helpers
 __say() { printf '%s\n' "$*"; }
 __die() {
@@ -876,6 +907,13 @@ __write_nginx_vhost() {
 # NetBird self-hosted reverse proxy for $NB_DOMAIN
 
 server {
+  listen                                    80;
+  listen                                    [::]:80;
+  server_name                               $NB_DOMAIN;
+  return                                    301 https://\$host\$request_uri;
+}
+
+server {
   listen                                    $NB_EXTERNAL_PORT ssl http2;
   listen                                    [::]:$NB_EXTERNAL_PORT ssl http2;
   server_name                               $NB_DOMAIN;
@@ -884,7 +922,13 @@ server {
   keepalive_timeout                         75 75;
   client_max_body_size                      0;
   chunked_transfer_encoding                 on;
-  add_header Strict-Transport-Security      "max-age=7200";
+  add_header Strict-Transport-Security      "max-age=31536000; includeSubDomains";
+  gzip                                      on;
+  gzip_vary                                 on;
+  gzip_proxied                              any;
+  gzip_comp_level                           6;
+  gzip_min_length                           1024;
+  gzip_types                                text/css text/javascript application/javascript application/json font/woff2;
   ssl_protocols                             TLSv1.2 TLSv1.3;
   ssl_ciphers                               'EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH';
   ssl_prefer_server_ciphers                 on;
@@ -938,9 +982,8 @@ server {
     proxy_send_timeout                      3600;
     proxy_read_timeout                      3600;
     proxy_http_version                      1.1;
-    proxy_buffer_size                       128k;
-    proxy_buffers                           4 256k;
-    proxy_busy_buffers_size                 256k;
+    proxy_buffering                         off;
+    proxy_set_header                        Accept-Encoding    "";
     proxy_set_header                        Host               \$host;
     proxy_set_header                        X-Real-IP          \$remote_addr;
     proxy_set_header                        X-Forwarded-Proto  \$scheme;
