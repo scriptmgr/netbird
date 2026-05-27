@@ -1067,11 +1067,12 @@ __ensure_admin_user() {
 	if [ -n "$_ea_existing" ]; then
 		__say "Keycloak: realm admin user already exists — skipping creation"
 	else
-		# Create the admin user in the NetBird realm
+		# Create the admin user in the NetBird realm.
+		# email/firstName/lastName required by Keycloak 26 user profile validation.
 		curl -sSf -X POST \
 			-H "Authorization: Bearer $_ea_token" \
 			-H "Content-Type: application/json" \
-			-d '{"username":"admin","enabled":true,"emailVerified":true}' \
+			-d "{\"username\":\"admin\",\"email\":\"admin@$NB_DOMAIN\",\"firstName\":\"Admin\",\"lastName\":\"NetBird\",\"enabled\":true,\"emailVerified\":true}" \
 			"$kc_url/admin/realms/$NB_ORG/users" >/dev/null \
 			|| __die "Failed to create admin user in Keycloak realm $NB_ORG"
 
