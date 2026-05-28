@@ -183,12 +183,12 @@ __on_exit() {
 }
 trap '__on_exit' EXIT INT TERM
 
-# __detect_fqdn — try hostname -d (domain part) then hostname -f (full qualified)
+# __detect_fqdn — prefer hostname -f (full FQDN) over hostname -d (domain only)
 __detect_fqdn() {
-	d=$(hostname -d 2>/dev/null | tr -d '[:space:]')
+	d=$(hostname -f 2>/dev/null | tr -d '[:space:]')
 	case "$d" in
-		''|'(none)'|localdomain)
-			d=$(hostname -f 2>/dev/null | tr -d '[:space:]')
+		''|'(none)'|localhost|localhost.localdomain)
+			d=$(hostname -d 2>/dev/null | tr -d '[:space:]')
 			;;
 	esac
 	printf '%s' "$d"
@@ -1704,9 +1704,16 @@ __install_host_peer() {
 	_hp_url="https://github.com/netbirdio/netbird/releases/download/v${NB_VERSION}/netbird_${NB_VERSION}_linux_${_hp_arch}.tar.gz"
 	_hp_tmp=$(mktemp -d)
 
-	__say "NetBird host peer: downloading v$NB_VERSION ($NB_VERSION) binary..."
-	if ! curl -fsSL "$_hp_url" | tar -xzf - -C "$_hp_tmp" netbird 2>/dev/null; then
+	# Download to file first — piping directly from curl to tar fails on GitHub
+	# CDN redirects because the connection drops before the archive is fully read.
+	__say "NetBird host peer: downloading v$NB_VERSION binary..."
+	if ! curl -fsSL -o "$_hp_tmp/netbird.tar.gz" "$_hp_url" 2>/dev/null; then
 		__warn "failed to download NetBird binary from $_hp_url — skipping host peer"
+		rm -rf "$_hp_tmp"
+		return 0
+	fi
+	if ! tar -xzf "$_hp_tmp/netbird.tar.gz" -C "$_hp_tmp" netbird 2>/dev/null; then
+		__warn "failed to extract NetBird binary from tarball — skipping host peer"
 		rm -rf "$_hp_tmp"
 		return 0
 	fi
