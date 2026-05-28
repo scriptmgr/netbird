@@ -34,10 +34,14 @@ set -eu
 # Use stdout when running interactively, stderr otherwise (e.g. curl|sh,
 # ssh host 'sh script').  Never try /dev/tty — exec is a special built-in
 # and a failed redirect exits the shell even inside an OR list.
+# _HAVE_TTY=1 enables animated spinner; =0 disables \r-based overwriting so
+# piped/logged output is clean (each step gets one static line).
 if [ -t 1 ]; then
     exec 9>&1
+    _HAVE_TTY=1
 else
     exec 9>&2
+    _HAVE_TTY=0
 fi
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -101,36 +105,44 @@ _SPIN_MSG=""
 
 __spin_start() {
     _SPIN_MSG="$1"
-    printf '  [ - ] %s' "$_SPIN_MSG" >&9
-    (
-        _i=0
-        while true; do
-            case $((_i % 4)) in
-            0) _c='-' ;; 1) _c='\' ;; 2) _c='|' ;; *) _c='/' ;;
-            esac
-            printf '\r  [ %s ] %s' "$_c" "$_SPIN_MSG" >&9
-            sleep 0.1
-            _i=$((_i + 1))
-        done
-    ) &
-    _SPIN_PID=$!
+    if [ "$_HAVE_TTY" -eq 1 ]; then
+        printf '  [ - ] %s' "$_SPIN_MSG" >&9
+        (
+            _i=0
+            while true; do
+                case $((_i % 4)) in
+                0) _c='-' ;; 1) _c='\' ;; 2) _c='|' ;; *) _c='/' ;;
+                esac
+                printf '\r  [ %s ] %s' "$_c" "$_SPIN_MSG" >&9
+                sleep 0.1
+                _i=$((_i + 1))
+            done
+        ) &
+        _SPIN_PID=$!
+    else
+        printf '  [ .. ] %s\n' "$_SPIN_MSG" >&9
+    fi
 }
 
 __spin_end() {
     _se_sym="$1"
-    if [ -n "$_SPIN_PID" ]; then
-        kill "$_SPIN_PID" 2>/dev/null || true
-        wait "$_SPIN_PID" 2>/dev/null || true
-        _SPIN_PID=""
+    if [ "$_HAVE_TTY" -eq 1 ]; then
+        if [ -n "$_SPIN_PID" ]; then
+            kill "$_SPIN_PID" 2>/dev/null || true
+            wait "$_SPIN_PID" 2>/dev/null || true
+            _SPIN_PID=""
+        fi
+        printf '\r  [ %s ] %-60s\n' "$_se_sym" "$_SPIN_MSG" >&9
+    else
+        printf '  [ %s ] %s\n' "$_se_sym" "$_SPIN_MSG" >&9
     fi
-    printf '\r  [ %s ] %-60s\n' "$_se_sym" "$_SPIN_MSG" >&9
 }
 
 __spin_ok()    { __spin_end 'ok'; }
 __spin_fail()  { __spin_end '!!'; }
 __spin_warn()  { __spin_end ' !'; }
 __spin_clear() {
-    if [ -n "$_SPIN_PID" ]; then
+    if [ "$_HAVE_TTY" -eq 1 ] && [ -n "$_SPIN_PID" ]; then
         kill "$_SPIN_PID" 2>/dev/null || true
         wait "$_SPIN_PID" 2>/dev/null || true
         _SPIN_PID=""
