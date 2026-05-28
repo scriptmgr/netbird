@@ -30,6 +30,13 @@ SCRIPT_SRC_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 
 set -eu
 
+# fd 9 = direct terminal output; bypasses stdout redirection inside __step
+if [ -t 1 ]; then
+    exec 9>&1
+else
+    exec 9>/dev/tty 2>/dev/null || exec 9>&2
+fi
+
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # Argument handling
 case "${1:-}" in
@@ -65,14 +72,113 @@ esac
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # Helpers
-__say() { printf '%s\n' "$*"; }
-__die() {
-	__say "ERROR: $*" >&2
-	exit 1
-}
+
+# Install log — all command output goes here; shown on failure
+_LOG="/tmp/netbird-install-$$.log"
+: >"$_LOG"
+
+# Collected warnings shown in summary
+_WARN_FILE="/tmp/netbird-warn-$$.log"
+: >"$_WARN_FILE"
+
+# Flags
+_INSTALL_STARTED=0
+_INSTALL_COMPLETE=0
+
+__say()      { printf '%s\n' "$*"; }
+__log()      { printf '%s\n' "$*" >>"$_LOG"; }
+__warn()     { printf '! %s\n' "$*" >>"$_WARN_FILE"; printf '[warn] %s\n' "$*" >>"$_LOG"; }
 __have_cmd() { command -v "$1" >/dev/null 2>&1; }
 __need_cmd() { __have_cmd "$1" || __die "missing required command: $1"; }
-__as_root() { [ "$(id -u)" -eq 0 ] || __die "please run as root (sudo sh ./install.sh)"; }
+__as_root()  { [ "$(id -u)" -eq 0 ] || __die "please run as root (sudo sh ./install.sh)"; }
+
+# Spinner — background process writing to fd 9
+_SPIN_PID=""
+_SPIN_MSG=""
+
+__spin_start() {
+    _SPIN_MSG="$1"
+    printf '  [ - ] %s' "$_SPIN_MSG" >&9
+    (
+        _i=0
+        while true; do
+            case $((_i % 4)) in
+            0) _c='-' ;; 1) _c='\\' ;; 2) _c='|' ;; *) _c='/' ;;
+            esac
+            printf '\r  [ %s ] %s' "$_c" "$_SPIN_MSG" >&9
+            sleep 0.1
+            _i=$((_i + 1))
+        done
+    ) &
+    _SPIN_PID=$!
+}
+
+__spin_end() {
+    _se_sym="$1"
+    if [ -n "$_SPIN_PID" ]; then
+        kill "$_SPIN_PID" 2>/dev/null
+        wait "$_SPIN_PID" 2>/dev/null
+        _SPIN_PID=""
+    fi
+    printf '\r  [ %s ] %-60s\n' "$_se_sym" "$_SPIN_MSG" >&9
+}
+
+__spin_ok()    { __spin_end 'ok'; }
+__spin_fail()  { __spin_end '!!'; }
+__spin_warn()  { __spin_end ' !'; }
+__spin_clear() {
+    if [ -n "$_SPIN_PID" ]; then
+        kill "$_SPIN_PID" 2>/dev/null
+        wait "$_SPIN_PID" 2>/dev/null
+        _SPIN_PID=""
+        printf '\r%80s\r' '' >&9
+    fi
+}
+
+__die() {
+    __spin_fail
+    printf '\n  ERROR: %s\n' "$*" >&9
+    exit 1
+}
+
+# __step label function — run function under a spinner, capturing all output.
+# On success: show [ ok ]. On failure: show [ !! ], tail the log, exit 1.
+__step() {
+    _st_lbl="$1"; shift
+    __spin_start "$_st_lbl"
+    if "$@" >>"$_LOG" 2>&1; then
+        __spin_ok
+    else
+        __spin_fail
+        printf '\n  Last output:\n' >&9
+        tail -20 "$_LOG" | sed 's/^/    /' >&9
+        printf '  Full log: %s\n\n' "$_LOG" >&9
+        exit 1
+    fi
+}
+
+# Partial-install cleanup — called by trap on non-zero exit after install started
+__cleanup_partial() {
+    printf '\n  Cleaning up partial install...\n' >&9
+    _cp_dc="${NB_ROOT:-/opt/netbird}/compose/docker-compose.yml"
+    if [ -f "$_cp_dc" ]; then
+        docker compose -f "$_cp_dc" down -v --remove-orphans >>"$_LOG" 2>&1 || true
+    fi
+    [ -n "${NB_ROOT:-}" ] && [ -d "$NB_ROOT" ] && rm -rf "$NB_ROOT"
+    rm -f "/etc/nginx/vhosts.d/${NB_DOMAIN:-netbird}.conf"
+}
+
+__on_exit() {
+    _oe_rc=$?
+    __spin_clear
+    if [ "$_INSTALL_COMPLETE" -eq 0 ] && [ "$_INSTALL_STARTED" -eq 1 ] && [ "$_oe_rc" -ne 0 ]; then
+        __cleanup_partial
+        printf '  Install log: %s\n' "$_LOG" >&9
+    else
+        rm -f "$_LOG" "$_WARN_FILE"
+    fi
+}
+trap '__on_exit' EXIT INT TERM
 
 # __detect_fqdn — try hostname -d (domain part) then hostname -f (full qualified)
 __detect_fqdn() {
@@ -368,8 +474,8 @@ chmod 700 "$NB_SECRETS"
 __install_docker() {
 	if __have_cmd docker && docker compose version >/dev/null 2>&1; then
 		__say "Docker and Compose plugin already present — skipping installation."
-		systemctl is-enabled docker >/dev/null 2>&1 || systemctl enable docker 2>/dev/null || __say "Warning: could not enable docker service — continuing (it is already running)"
-		systemctl is-active docker >/dev/null 2>&1 || systemctl start docker 2>/dev/null || __say "Warning: could not start docker service — continuing"
+		systemctl is-enabled docker >/dev/null 2>&1 || systemctl enable docker 2>/dev/null || __warn "could not enable docker service — continuing (it is already running)"
+		systemctl is-active docker >/dev/null 2>&1 || systemctl start docker 2>/dev/null || __warn "could not start docker service — continuing"
 		return 0
 	fi
 
@@ -399,7 +505,7 @@ __install_docker() {
 				"$arch" "$linux_id" "$codename" >/etc/apt/sources.list.d/docker.list
 			apt-get update -y
 			apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-			systemctl enable --now docker 2>/dev/null || __say "Warning: could not enable/start docker via systemctl — continuing"
+			systemctl enable --now docker 2>/dev/null || __warn "could not enable/start docker via systemctl — continuing"
 			;;
 		fedora)
 			__need_cmd dnf
@@ -407,7 +513,7 @@ __install_docker() {
 			dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
 			dnf -y remove containerd 2>/dev/null || true
 			dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-			systemctl enable --now docker 2>/dev/null || __say "Warning: could not enable/start docker via systemctl — continuing"
+			systemctl enable --now docker 2>/dev/null || __warn "could not enable/start docker via systemctl — continuing"
 			;;
 		almalinux | rocky | centos | rhel | ol)
 			__need_cmd dnf
@@ -415,13 +521,13 @@ __install_docker() {
 			dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
 			dnf -y remove containerd 2>/dev/null || true
 			dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-			systemctl enable --now docker 2>/dev/null || __say "Warning: could not enable/start docker via systemctl — continuing"
+			systemctl enable --now docker 2>/dev/null || __warn "could not enable/start docker via systemctl — continuing"
 			;;
 		opensuse* | sles)
 			__need_cmd zypper
 			zypper refresh
 			zypper -n install docker docker-compose
-			systemctl enable --now docker 2>/dev/null || __say "Warning: could not enable/start docker via systemctl — continuing"
+			systemctl enable --now docker 2>/dev/null || __warn "could not enable/start docker via systemctl — continuing"
 			# Distro docker-compose may be a standalone binary, not a CLI plugin.
 			# Symlink it into the CLI plugin directory so 'docker compose' works.
 			mkdir -p /usr/lib/docker/cli-plugins
@@ -432,7 +538,7 @@ __install_docker() {
 		arch | manjaro | endeavouros | arcolinux)
 			__need_cmd pacman
 			pacman -Sy --noconfirm docker docker-compose
-			systemctl enable --now docker 2>/dev/null || __say "Warning: could not enable/start docker via systemctl — continuing"
+			systemctl enable --now docker 2>/dev/null || __warn "could not enable/start docker via systemctl — continuing"
 			# Same as openSUSE: ensure the CLI plugin path is populated.
 			mkdir -p /usr/lib/docker/cli-plugins
 			if [ ! -f /usr/lib/docker/cli-plugins/docker-compose ] && __have_cmd docker-compose; then
@@ -451,8 +557,8 @@ __install_docker() {
 
 	__have_cmd docker || __die "Docker not installed"
 	docker compose version >/dev/null 2>&1 || __die "Docker Compose plugin not found (docker compose)."
-	systemctl is-enabled docker >/dev/null 2>&1 || systemctl enable docker 2>/dev/null || __say "Warning: could not enable docker service — continuing"
-	systemctl is-active docker >/dev/null 2>&1 || systemctl start docker 2>/dev/null || __say "Warning: could not start docker service — continuing"
+	systemctl is-enabled docker >/dev/null 2>&1 || systemctl enable docker 2>/dev/null || __warn "could not enable docker service — continuing"
+	systemctl is-active docker >/dev/null 2>&1 || systemctl start docker 2>/dev/null || __warn "could not start docker service — continuing"
 }
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -557,7 +663,7 @@ __configure_host_integration() {
 	almalinux | rocky | centos | rhel | ol)
 		__need_cmd dnf
 		dnf -y install firewalld policycoreutils-python-utils container-selinux
-		systemctl enable --now firewalld 2>/dev/null || __say "Warning: could not enable/start firewalld — continuing"
+		systemctl enable --now firewalld 2>/dev/null || __warn "could not enable/start firewalld — continuing"
 		if __selinux_enabled; then
 			setsebool -P httpd_can_network_connect 1
 			__say "SELinux: httpd_can_network_connect enabled (nginx → upstream proxying)"
@@ -1107,8 +1213,8 @@ __ensure_admin_user() {
 		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""), end="")')
 
 	if [ -z "$_ea_token" ]; then
-		__say "WARNING: could not obtain Keycloak admin token — skipping admin user creation"
-		__say "  Create an admin user manually at $(__nb_origin)/admin"
+		__warn "could not obtain Keycloak admin token — skipping admin user creation"
+		__warn "  Create an admin user manually at $(__nb_origin)/admin"
 		return 0
 	fi
 
@@ -1390,7 +1496,7 @@ __configure_netbird_defaults() {
 		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""), end="")')
 
 	if [ -z "$_nd_admin_token" ]; then
-		__say "WARNING: could not obtain Keycloak admin token — skipping NetBird defaults configuration"
+		__warn "could not obtain Keycloak admin token — skipping NetBird defaults configuration"
 		return 0
 	fi
 
@@ -1401,7 +1507,7 @@ __configure_netbird_defaults() {
 		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "", end="")')
 
 	if [ -z "$_nd_nb_client_uuid" ]; then
-		__say "WARNING: netbird-client not found in Keycloak — skipping NetBird defaults"
+		__warn "netbird-client not found in Keycloak — skipping NetBird defaults"
 		return 0
 	fi
 
@@ -1411,7 +1517,7 @@ __configure_netbird_defaults() {
 		-H "Content-Type: application/json" \
 		-d "{\"clientId\":\"netbird-client\",\"enabled\":true,\"publicClient\":true,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":true,\"redirectUris\":[\"http://localhost:53000/*\",\"http://localhost:54000/*\",\"https://$NB_DOMAIN/*\"],\"webOrigins\":[\"+\"]}" \
 		"$kc_url/admin/realms/$NB_ORG/clients/$_nd_nb_client_uuid" >/dev/null \
-		|| { __say "WARNING: could not enable direct access grants — skipping NetBird defaults"; return 0; }
+		|| { __warn "could not enable direct access grants — skipping NetBird defaults"; return 0; }
 
 	# Obtain a JWT for the admin user via resource owner password credentials
 	_nd_user_token=$(curl -s \
@@ -1431,7 +1537,7 @@ __configure_netbird_defaults() {
 		"$kc_url/admin/realms/$NB_ORG/clients/$_nd_nb_client_uuid" >/dev/null
 
 	if [ -z "$_nd_user_token" ]; then
-		__say "WARNING: could not obtain NetBird admin user token — skipping NetBird defaults"
+		__warn "could not obtain NetBird admin user token — skipping NetBird defaults"
 		return 0
 	fi
 	__say "  NetBird admin user token obtained"
@@ -1443,7 +1549,7 @@ __configure_netbird_defaults() {
 		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "", end="")')
 
 	if [ -z "$_nd_account_id" ]; then
-		__say "WARNING: could not fetch NetBird account ID — skipping defaults"
+		__warn "could not fetch NetBird account ID — skipping defaults"
 		return 0
 	fi
 	__say "  NetBird account ID: $_nd_account_id"
@@ -1490,7 +1596,7 @@ __configure_netbird_defaults() {
 			printf '%s\n' "$_nd_key" >"$NB_SECRETS/nb_setup_key_default"
 			chmod 600 "$NB_SECRETS/nb_setup_key_default"
 		else
-			__say "WARNING: failed to create setup key 'Default'"
+			__warn "failed to create setup key 'Default'"
 		fi
 	fi
 
@@ -1596,7 +1702,7 @@ __install_host_peer() {
 
 	__say "NetBird host peer: downloading v$NB_VERSION ($NB_VERSION) binary..."
 	if ! curl -fsSL "$_hp_url" | tar -xzf - -C "$_hp_tmp" netbird 2>/dev/null; then
-		__say "WARNING: failed to download NetBird binary from $_hp_url — skipping host peer"
+		__warn "failed to download NetBird binary from $_hp_url — skipping host peer"
 		rm -rf "$_hp_tmp"
 		return 0
 	fi
@@ -1628,8 +1734,54 @@ __install_host_peer() {
 		2>/dev/null; then
 		__say "NetBird host peer: enrolled successfully"
 	else
-		__say "WARNING: netbird up failed — check 'netbird status' after install completes"
+		__warn "netbird up failed — check 'netbird status' after install completes"
 	fi
+}
+
+__docker_pull() {
+    cd "$NB_COMPOSE" || return 1
+    set -a; . "$KC_ENV_FILE"; . "$NETBIRD_ENV_FILE"; set +a
+    docker compose pull
+}
+
+__docker_up() {
+    cd "$NB_COMPOSE" || return 1
+    set -a; . "$KC_ENV_FILE"; . "$NETBIRD_ENV_FILE"; set +a
+    docker compose up -d
+}
+
+__wait_for_keycloak() {
+    __wait_for_http "http://172.17.0.1:$NB_KC_MGMT_PORT/health/ready" "Keycloak"
+}
+
+__wait_for_dashboard() {
+    __wait_for_http "http://172.17.0.1:$NB_DASHBOARD_BACKEND_PORT/" "NetBird dashboard"
+}
+
+__wait_for_management_api() {
+    __wait_for_management "http://172.17.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT/api/accounts"
+}
+
+__oidc_restart_if_needed() {
+    [ "$_OIDC_CONFIGURED_THIS_RUN" -eq 0 ] && return 0
+    set -a; . "$NETBIRD_ENV_FILE"; set +a
+    __write_dashboard_env
+    __write_management_json
+    cd "$NB_COMPOSE" || return 1
+    set -a; . "$KC_ENV_FILE"; . "$NETBIRD_ENV_FILE"; set +a
+    docker compose up -d --force-recreate "$MGMT_SVC" "$DASH_SVC"
+    _attempt=1
+    while [ "$_attempt" -le 30 ]; do
+        _running="$(docker compose -f "$DC_FILE" ps --services --status running 2>/dev/null)"
+        if printf '%s\n' "$_running" | grep -qx -- "$MGMT_SVC" \
+        && printf '%s\n' "$_running" | grep -qx -- "$DASH_SVC"; then
+            return 0
+        fi
+        sleep 5
+        _attempt=$((_attempt + 1))
+    done
+    __warn "management/dashboard did not restart cleanly after OIDC config"
+    return 0
 }
 
 # __verify_turn — confirm coturn is listening on the expected UDP port.
@@ -1640,134 +1792,71 @@ __verify_turn() {
 	if ss -ulnp 2>/dev/null | grep -q -- ":$NB_TURN_PORT[[:space:]]"; then
 		__say "TURN: coturn listening on udp/$NB_TURN_PORT"
 	else
-		__say "WARNING: coturn does not appear to be listening on udp/$NB_TURN_PORT"
-		__say "  Check: docker compose -f $DC_FILE logs $TURN_SVC"
+		__warn "coturn does not appear to be listening on udp/$NB_TURN_PORT"
+		__warn "  Check: docker compose -f $DC_FILE logs $TURN_SVC"
 	fi
 }
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # Main flow
-__configure_kernel
-__install_docker
-__configure_host_integration
-__ensure_runtime_secrets
+_INSTALL_STARTED=1
 
-__write_keycloak_env
-__write_netbird_env
+__step "Configuring kernel"              __configure_kernel
+__step "Installing Docker"               __install_docker
+__step "Configuring host"                __configure_host_integration
+__step "Generating secrets"              __ensure_runtime_secrets
+__step "Writing Keycloak config"         __write_keycloak_env
+__step "Writing NetBird config"          __write_netbird_env
 
-set -a
-. "$KC_ENV_FILE"
-. "$NETBIRD_ENV_FILE"
-set +a
+set -a; . "$KC_ENV_FILE"; . "$NETBIRD_ENV_FILE"; set +a
 
-__write_dashboard_env
-__write_turnserver_conf
-__write_management_json
-__write_compose
-__validate_compose_definition
+__step "Writing dashboard config"        __write_dashboard_env
+__step "Writing TURN config"             __write_turnserver_conf
+__step "Writing management config"       __write_management_json
+__step "Writing Compose file"            __write_compose
+__step "Validating Compose file"         __validate_compose_definition
+__step "Pulling Docker images"           __docker_pull
+__step "Starting services"               __docker_up
+__step "Configuring firewall"            __configure_docker_firewalld
+__step "Validating running services"     __validate_running_services
+__step "Checking TURN"                   __verify_turn
+__step "Waiting for Keycloak"            __wait_for_keycloak
+__step "Waiting for dashboard"           __wait_for_dashboard
+__step "Waiting for management API"      __wait_for_management_api
+__step "Configuring OIDC"               __auto_configure_oidc
+__step "Applying OIDC to services"       __oidc_restart_if_needed
+__step "Provisioning TLS certificate"    __ensure_tls_cert
+__step "Writing nginx vhost"             __write_nginx_vhost
+__step "Creating admin users"            __ensure_admin_user
+__step "Configuring NetBird defaults"    __configure_netbird_defaults
+__step "Installing host peer"            __install_host_peer
 
-(
-	cd "$NB_COMPOSE"
-	set -a
-	. "$KC_ENV_FILE"
-	. "$NETBIRD_ENV_FILE"
-	set +a
-	docker compose pull
-	docker compose up -d
-)
+_INSTALL_COMPLETE=1
 
-__configure_docker_firewalld
-__validate_running_services
-__verify_turn
-__wait_for_http "http://172.17.0.1:$NB_KC_MGMT_PORT/health/ready" "Keycloak"
-__wait_for_http "http://172.17.0.1:$NB_DASHBOARD_BACKEND_PORT/" "NetBird dashboard"
-__wait_for_management "http://172.17.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT/api/accounts"
-
-# Auto-configure Keycloak OIDC on first install (no-op on reruns)
-__auto_configure_oidc
-
-# If OIDC was configured during this run, reload env and rewrite + restart affected services
-if [ "$_OIDC_CONFIGURED_THIS_RUN" -eq 1 ]; then
-	set -a
-	. "$NETBIRD_ENV_FILE"
-	set +a
-	# Rewrite configs that embed the client IDs
-	__write_dashboard_env
-	__write_management_json
-	(
-		cd "$NB_COMPOSE"
-		set -a
-		. "$KC_ENV_FILE"
-		. "$NETBIRD_ENV_FILE"
-		set +a
-		docker compose up -d --force-recreate "$MGMT_SVC" "$DASH_SVC"
-	)
-	__say "Waiting for management and dashboard to restart with real OIDC config..."
-	attempt=1
-	while [ "$attempt" -le 30 ]; do
-		running="$(docker compose -f "$DC_FILE" ps --services --status running 2>/dev/null)"
-		if printf '%s\n' "$running" | grep -qx -- "$MGMT_SVC" && printf '%s\n' "$running" | grep -qx -- "$DASH_SVC"; then
-			break
-		fi
-		sleep 5
-		attempt=$((attempt + 1))
-	done
+# Show collected warnings if any
+if [ -s "$_WARN_FILE" ]; then
+    printf '\n  Warnings:\n' >&9
+    sed 's/^/  /' "$_WARN_FILE" >&9
 fi
-
-__ensure_tls_cert
-__write_nginx_vhost
-__ensure_admin_user
-__configure_netbird_defaults
-__install_host_peer
 
 cat <<OUT
 
 ================================================================================
-NetBird self-hosted stack is up (or updated) at: $NB_ROOT
+  NetBird is up — $(__nb_origin)
 
-Host integration:
-  - Kernel modules:   $NB_MODULES_FILE
-  - sysctl drop-in:   $NB_SYSCTL_FILE
-  - Firewalld always-open: tcp/22 (ssh), tcp/80, tcp/443
-  - Firewalld stack ports: tcp/$NB_EXTERNAL_PORT, udp/$NB_TURN_PORT, udp/$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT, udp/51820 (wireguard)
-  - SELinux bind relabeling: $(if __selinux_enabled; then printf 'enabled'; else printf 'not required'; fi)
+  Admin login
+    URL:       $(__nb_origin)
+    Username:  $NB_ADMIN_USER
+    Password:  $(cat "$NB_ADMIN_PASS_FILE")
 
-Local reverse-proxy backends:
-  - Dashboard root                          -> http://172.17.0.1:$NB_DASHBOARD_BACKEND_PORT
-  - Management REST / websocket proxy       -> http://172.17.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT
-  - Keycloak OIDC / UI                      -> http://172.17.0.1:$NB_KC_BACKEND_PORT
-  - Signal                                  -> http://172.17.0.1:$NB_SIGNAL_BACKEND_PORT
-  - TURN                                    -> udp/$NB_TURN_PORT and udp/$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT
+  Setup key (Default — reusable, 3650 days)
+    $([ -f "$NB_SECRETS/nb_setup_key_default" ] && cat "$NB_SECRETS/nb_setup_key_default" || printf 'see %s/nb_setup_key_default' "$NB_SECRETS")
 
-Keycloak admin (configuration only):
-  - URL:      $(__nb_origin)/admin
-  - Username: admin
-  - Password: see $KC_ADMIN_PASS_FILE
+  Host peer
+    netbird status
 
-NetBird admin (day-to-day management):
-  - URL:      $(__nb_origin)
-  - Username: $NB_ADMIN_USER
-  - Password: see $NB_ADMIN_PASS_FILE
-
-Setup key:
-  - Name:     Default (reusable, 3650 days)
-  - Key:      see $NB_SECRETS/nb_setup_key_default (created on first install)
-
-Host peer:
-  - Binary:   /usr/local/bin/netbird
-  - Status:   run 'netbird status' to verify enrollment
-  - Peer DNS domain: $NB_DOMAIN
-
-Important config files:
-  - Keycloak env:        $KC_ENV_FILE
-  - NetBird env:         $NETBIRD_ENV_FILE
-  - Dashboard env:       $DASHBOARD_ENV_FILE
-  - Management config:   $MGMT_JSON_FILE
-  - Coturn config:       $TURN_CONF_FILE
-
-This script is idempotent for reruns: generated secrets, database credentials,
-and datastore encryption keys are preserved unless you replace the files
-under $NB_SECRETS yourself.
+  Config root:  $NB_ROOT
+  Secrets:      $NB_SECRETS
 ================================================================================
 OUT
 
