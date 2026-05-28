@@ -1351,7 +1351,7 @@ __auto_configure_oidc() {
 	curl -sSf -X POST \
 		-H "Authorization: Bearer $admin_token" \
 		-H "Content-Type: application/json" \
-		-d "{\"realm\":\"$NB_ORG\",\"enabled\":true,\"displayName\":\"NetBird\",\"registrationAllowed\":true,\"resetPasswordAllowed\":true}" \
+		-d "{\"realm\":\"$NB_ORG\",\"enabled\":true,\"displayName\":\"$NB_ORG\",\"registrationAllowed\":true,\"resetPasswordAllowed\":true}" \
 		"$kc_url/admin/realms" >/dev/null \
 		|| __say "  Note: $NB_ORG realm may already exist, continuing..."
 	__say "  Realm '$NB_ORG' ensured"
