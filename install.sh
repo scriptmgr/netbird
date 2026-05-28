@@ -58,8 +58,11 @@ case "${1:-}" in
     printf '  NB_ORG               Keycloak realm name (default: netbird)\n'
     printf '  NB_EXTERNAL_PORT     Public HTTPS port (default: 443)\n'
     printf '  NB_TURN_PORT         TURN UDP port (default: 3478)\n'
-    printf '  NB_VERSION           NetBird version tag (default: %s)\n' "${NB_VERSION:-0.71.4}"
-    printf '  NB_DASHBOARD_VERSION Dashboard version tag (default: %s)\n' "${NB_DASHBOARD_VERSION:-v2.38.1}"
+    printf '  NB_VERSION           NetBird mgmt/signal image tag (default: latest)\n'
+    printf '  NB_DASHBOARD_VERSION NetBird dashboard image tag (default: latest)\n'
+    printf '  NB_KC_VERSION        Keycloak image tag (default: latest)\n'
+    printf '  NB_PG_VERSION        Postgres image tag (default: 16-alpine)\n'
+    printf '  NB_COTURN_VERSION    Coturn image tag (default: latest)\n'
     printf '  NB_ADMIN_USER        Day-to-day NetBird admin username (default: administrator)\n'
     printf '  NB_ADMIN_EMAIL       Day-to-day NetBird admin email (default: administrator@{NB_DOMAIN})\n'
     printf '\nSee README.md for full documentation.\n'
@@ -424,8 +427,11 @@ __nb_origin() {
 : "${NB_IDP_MGMT_CLIENT_ID:=replace-me}"
 : "${NB_IDP_MGMT_CLIENT_SECRET:=replace-me}"
 : "${NB_AUTH_SUPPORTED_SCOPES:=openid profile email offline_access}"
-: "${NB_VERSION:=0.71.4}"
-: "${NB_DASHBOARD_VERSION:=v2.38.1}"
+: "${NB_VERSION:=latest}"
+: "${NB_DASHBOARD_VERSION:=latest}"
+: "${NB_KC_VERSION:=latest}"
+: "${NB_PG_VERSION:=16-alpine}"
+: "${NB_COTURN_VERSION:=latest}"
 : "${NB_SSL_CERT:=$NB_ROOT/etc/tls/fullchain.pem}"
 : "${NB_SSL_KEY:=$NB_ROOT/etc/tls/privkey.pem}"
 : "${NB_ADMIN_USER:=administrator}"
@@ -886,7 +892,7 @@ __write_compose() {
 name: netbird
 services:
   $KC_DB_SVC:
-    image: docker.io/postgres:16-alpine
+    image: docker.io/postgres:$NB_PG_VERSION
     restart: unless-stopped
     env_file:
       - $KC_ENV_FILE
@@ -906,7 +912,7 @@ services:
         max-file: "3"
 
   $KC_SVC:
-    image: quay.io/keycloak/keycloak:26.2
+    image: quay.io/keycloak/keycloak:$NB_KC_VERSION
     depends_on:
       $KC_DB_SVC:
         condition: service_healthy
@@ -933,7 +939,7 @@ services:
         max-file: "3"
 
   $TURN_SVC:
-    image: docker.io/coturn/coturn@sha256:161cedd63c5414c2136f306098e02e9aede74606cedad8b9b8581aae1da4e732
+    image: docker.io/coturn/coturn:$NB_COTURN_VERSION
     restart: unless-stopped
     network_mode: host
     command:
@@ -1713,12 +1719,24 @@ __install_host_peer() {
 		;;
 	esac
 
-	_hp_url="https://github.com/netbirdio/netbird/releases/download/v${NB_VERSION}/netbird_${NB_VERSION}_linux_${_hp_arch}.tar.gz"
+	# Resolve "latest" to the actual release tag — GitHub release URLs require an
+	# explicit version number; "latest" is not a valid tag in the download path.
+	_hp_version="$NB_VERSION"
+	if [ "$_hp_version" = "latest" ]; then
+		_hp_version=$(curl -sSf https://api.github.com/repos/netbirdio/netbird/releases/latest \
+			| python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].lstrip('v'))") || true
+	fi
+	if [ -z "$_hp_version" ] || [ "$_hp_version" = "latest" ]; then
+		__warn "could not resolve latest NetBird release version — skipping host peer"
+		return 0
+	fi
+
+	_hp_url="https://github.com/netbirdio/netbird/releases/download/v${_hp_version}/netbird_${_hp_version}_linux_${_hp_arch}.tar.gz"
 	_hp_tmp=$(mktemp -d)
 
 	# Download to file first — piping directly from curl to tar fails on GitHub
 	# CDN redirects because the connection drops before the archive is fully read.
-	__say "NetBird host peer: downloading v$NB_VERSION binary..."
+	__say "NetBird host peer: downloading v$_hp_version binary..."
 	if ! curl -fsSL -o "$_hp_tmp/netbird.tar.gz" "$_hp_url" 2>/dev/null; then
 		__warn "failed to download NetBird binary from $_hp_url — skipping host peer"
 		rm -rf "$_hp_tmp"
