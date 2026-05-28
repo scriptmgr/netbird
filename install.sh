@@ -566,7 +566,12 @@ __configure_host_integration() {
 	esac
 
 	if __have_cmd firewall-cmd; then
+		# Unconditional: SSH and web must always be reachable on the public interface.
+		# These are added before any peer/VPN changes so out-of-band access is never lost.
+		firewall-cmd --quiet --permanent --add-service=ssh 2>/dev/null || true
+		firewall-cmd --quiet --permanent --add-port=22/tcp 2>/dev/null || true
 		__firewall_open_port "80/tcp"
+		__firewall_open_port "443/tcp"
 		__firewall_open_port "$NB_EXTERNAL_PORT/tcp"
 		__firewall_open_port "$NB_TURN_PORT/udp"
 		__firewall_open_port "$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT/udp"
@@ -1551,6 +1556,82 @@ __ensure_tls_cert() {
 	__say "TLS: self-signed certificate generated (20 years) -> $NB_SSL_CERT"
 }
 
+# __install_host_peer — download the NetBird binary and enroll this host as a peer.
+# Skipped if port 51820/UDP is already in use (another WireGuard instance).
+# Downloads the release tarball directly from GitHub — no distro packages needed.
+# SSH (22/tcp) is permanently opened in firewalld before peer enrollment so the
+# host is always reachable out-of-band even if the WireGuard interface has issues.
+__install_host_peer() {
+	# Already enrolled and connected — nothing to do
+	if __have_cmd netbird && netbird status 2>/dev/null | grep -qi 'connected'; then
+		__say "NetBird host peer: already connected — skipping"
+		return 0
+	fi
+
+	# Bail out if something else owns 51820/UDP
+	if __have_cmd ss && ss -ulnp 2>/dev/null | grep -q -- ':51820[[:space:]]'; then
+		__say "NetBird host peer: port 51820/UDP in use — skipping peer installation"
+		return 0
+	fi
+
+	setup_key_file="$NB_SECRETS/nb_setup_key_default"
+	if [ ! -f "$setup_key_file" ]; then
+		__say "NetBird host peer: no setup key at $setup_key_file — skipping (run again after first install)"
+		return 0
+	fi
+
+	# Map uname -m to the GitHub release arch string
+	case "$(uname -m)" in
+	x86_64)         _hp_arch=amd64 ;;
+	aarch64|arm64)  _hp_arch=arm64 ;;
+	armv7*|armv6*)  _hp_arch=armv6 ;;
+	*)
+		__say "NetBird host peer: unsupported arch $(uname -m) — skipping"
+		return 0
+		;;
+	esac
+
+	_hp_url="https://github.com/netbirdio/netbird/releases/download/v${NB_VERSION}/netbird_${NB_VERSION}_linux_${_hp_arch}.tar.gz"
+	_hp_tmp=$(mktemp -d)
+
+	__say "NetBird host peer: downloading v$NB_VERSION ($NB_VERSION) binary..."
+	if ! curl -fsSL "$_hp_url" | tar -xzf - -C "$_hp_tmp" netbird 2>/dev/null; then
+		__say "WARNING: failed to download NetBird binary from $_hp_url — skipping host peer"
+		rm -rf "$_hp_tmp"
+		return 0
+	fi
+	install -m 0755 "$_hp_tmp/netbird" /usr/local/bin/netbird
+	rm -rf "$_hp_tmp"
+	__say "  Installed: /usr/local/bin/netbird"
+
+	# Ensure SSH is permanently open before touching the network stack
+	if __have_cmd firewall-cmd; then
+		firewall-cmd --quiet --permanent --add-service=ssh 2>/dev/null || true
+		firewall-cmd --quiet --permanent --add-port=22/tcp 2>/dev/null || true
+		__firewall_open_port "51820/udp"
+		firewall-cmd --quiet --reload 2>/dev/null || true
+	fi
+
+	# Load WireGuard kernel module if available; netbird falls back to userspace otherwise
+	modprobe wireguard 2>/dev/null || true
+
+	# Install and start the netbird system service
+	netbird service install 2>/dev/null || true
+	netbird service start 2>/dev/null || true
+
+	# Enroll the host as a peer using the Default setup key
+	_hp_setup_key="$(__read_value "$setup_key_file")"
+	if netbird up \
+		--setup-key "$_hp_setup_key" \
+		--management-url "$(__nb_origin)" \
+		--daemon-addr unix:///var/run/netbird.sock \
+		2>/dev/null; then
+		__say "NetBird host peer: enrolled successfully"
+	else
+		__say "WARNING: netbird up failed — check 'netbird status' after install completes"
+	fi
+}
+
 # __verify_turn — confirm coturn is listening on the expected UDP port.
 # Runs after 'docker compose up' completes.  Issues a warning rather than
 # dying so a firewall/kernel issue doesn't abort an otherwise healthy install.
@@ -1637,6 +1718,7 @@ __ensure_tls_cert
 __write_nginx_vhost
 __ensure_admin_user
 __configure_netbird_defaults
+__install_host_peer
 
 cat <<OUT
 
@@ -1646,7 +1728,8 @@ NetBird self-hosted stack is up (or updated) at: $NB_ROOT
 Host integration:
   - Kernel modules:   $NB_MODULES_FILE
   - sysctl drop-in:   $NB_SYSCTL_FILE
-  - Firewalld opened: tcp/80, tcp/$NB_EXTERNAL_PORT, udp/$NB_TURN_PORT, udp/$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT
+  - Firewalld always-open: tcp/22 (ssh), tcp/80, tcp/443
+  - Firewalld stack ports: tcp/$NB_EXTERNAL_PORT, udp/$NB_TURN_PORT, udp/$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT, udp/51820 (wireguard)
   - SELinux bind relabeling: $(if __selinux_enabled; then printf 'enabled'; else printf 'not required'; fi)
 
 Local reverse-proxy backends:
@@ -1670,7 +1753,10 @@ Setup key:
   - Name:     Default (reusable, 3650 days)
   - Key:      see $NB_SECRETS/nb_setup_key_default (created on first install)
 
-Peer DNS domain: $NB_DOMAIN
+Host peer:
+  - Binary:   /usr/local/bin/netbird
+  - Status:   run 'netbird status' to verify enrollment
+  - Peer DNS domain: $NB_DOMAIN
 
 Important config files:
   - Keycloak env:        $KC_ENV_FILE
