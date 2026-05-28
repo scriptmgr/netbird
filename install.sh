@@ -795,8 +795,8 @@ services:
     volumes:
       - $KC_DATA:/opt/keycloak/data:$rw_opts
     ports:
-      - 127.0.0.1:$NB_KC_BACKEND_PORT:8080
-      - 127.0.0.1:$NB_KC_MGMT_PORT:9000
+      - 172.17.0.1:$NB_KC_BACKEND_PORT:8080
+      - 172.17.0.1:$NB_KC_MGMT_PORT:9000
     networks: [$NB_DOCKER_NETWORK]
     healthcheck:
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && printf 'GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q -- '200' <&3"]
@@ -858,7 +858,7 @@ services:
       - $MGMT_DATA:/var/lib/netbird:$rw_opts
       - $MGMT_JSON_FILE:/etc/netbird/management.json:$ro_opts
     ports:
-      - 127.0.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT:8080
+      - 172.17.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT:8080
     networks: [$NB_DOCKER_NETWORK]
     logging:
       driver: json-file
@@ -874,7 +874,7 @@ services:
     depends_on:
       - $MGMT_SVC
     ports:
-      - 127.0.0.1:$NB_DASHBOARD_BACKEND_PORT:80
+      - 172.17.0.1:$NB_DASHBOARD_BACKEND_PORT:80
     networks: [$NB_DOCKER_NETWORK]
     logging:
       driver: json-file
@@ -891,7 +891,7 @@ services:
     volumes:
       - $SIGNAL_DATA:/var/lib/netbird:$rw_opts
     ports:
-      - 127.0.0.1:$NB_SIGNAL_BACKEND_PORT:10000
+      - 172.17.0.1:$NB_SIGNAL_BACKEND_PORT:10000
     networks: [$NB_DOCKER_NETWORK]
     logging:
       driver: json-file
@@ -950,7 +950,7 @@ server {
 
   # NetBird Signal — long-lived peer gRPC connections
   location /signalexchange.SignalExchange {
-    grpc_pass                               grpc://127.0.0.1:$NB_SIGNAL_BACKEND_PORT;
+    grpc_pass                               grpc://172.17.0.1:$NB_SIGNAL_BACKEND_PORT;
     grpc_set_header                         Host               \$host;
     grpc_set_header                         X-Real-IP          \$remote_addr;
     grpc_set_header                         X-Forwarded-For    \$remote_addr;
@@ -960,7 +960,7 @@ server {
 
   # NetBird Management — gRPC
   location /management.ManagementService {
-    grpc_pass                               grpc://127.0.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT;
+    grpc_pass                               grpc://172.17.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT;
     grpc_set_header                         Host               \$host;
     grpc_set_header                         X-Real-IP          \$remote_addr;
     grpc_set_header                         X-Forwarded-For    \$remote_addr;
@@ -983,7 +983,7 @@ server {
     proxy_set_header                        X-Forwarded-Scheme \$scheme;
     proxy_set_header                        X-Forwarded-For    \$proxy_add_x_forwarded_for;
     proxy_set_header                        X-Forwarded-Port   \$server_port;
-    proxy_pass                              http://127.0.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT;
+    proxy_pass                              http://172.17.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT;
     }
 
   # Keycloak OIDC, admin UI, and static resources
@@ -1002,7 +1002,7 @@ server {
     proxy_set_header                        X-Forwarded-For    \$proxy_add_x_forwarded_for;
     proxy_set_header                        X-Forwarded-Port   \$server_port;
     proxy_redirect                          http:// https://;
-    proxy_pass                              http://127.0.0.1:$NB_KC_BACKEND_PORT;
+    proxy_pass                              http://172.17.0.1:$NB_KC_BACKEND_PORT;
     }
 
   # NetBird dashboard (catch-all)
@@ -1023,7 +1023,7 @@ server {
     proxy_set_header                        Upgrade            \$http_upgrade;
     proxy_set_header                        Connection         \$connection_upgrade;
     proxy_redirect                          http:// https://;
-    proxy_pass                              http://127.0.0.1:$NB_DASHBOARD_BACKEND_PORT;
+    proxy_pass                              http://172.17.0.1:$NB_DASHBOARD_BACKEND_PORT;
     }
 }
 EOF
@@ -1094,7 +1094,7 @@ __validate_running_services() {
 }
 
 __ensure_admin_user() {
-	kc_url="http://127.0.0.1:$NB_KC_BACKEND_PORT"
+	kc_url="http://172.17.0.1:$NB_KC_BACKEND_PORT"
 	kc_admin_pass="$(__read_value "$KC_ADMIN_PASS_FILE")"
 
 	# Obtain a short-lived admin token from the master realm
@@ -1222,7 +1222,7 @@ __auto_configure_oidc() {
 
 	__say "Auto-configuring Keycloak OIDC for NetBird..."
 
-	kc_url="http://127.0.0.1:$NB_KC_BACKEND_PORT"
+	kc_url="http://172.17.0.1:$NB_KC_BACKEND_PORT"
 	kc_admin_pass="$(__read_value "$KC_ADMIN_PASS_FILE")"
 
 	# ------------------------------------------------------------------
@@ -1376,8 +1376,8 @@ __configure_netbird_defaults() {
 
 	__say "Configuring NetBird defaults (setup key, admin role, DNS domain)..."
 
-	kc_url="http://127.0.0.1:$NB_KC_BACKEND_PORT"
-	nb_url="http://127.0.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT"
+	kc_url="http://172.17.0.1:$NB_KC_BACKEND_PORT"
+	nb_url="http://172.17.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT"
 	kc_admin_pass="$(__read_value "$KC_ADMIN_PASS_FILE")"
 
 	# Obtain a Keycloak master-realm admin token to manage client config
@@ -1679,9 +1679,9 @@ __validate_compose_definition
 __configure_docker_firewalld
 __validate_running_services
 __verify_turn
-__wait_for_http "http://127.0.0.1:$NB_KC_MGMT_PORT/health/ready" "Keycloak"
-__wait_for_http "http://127.0.0.1:$NB_DASHBOARD_BACKEND_PORT/" "NetBird dashboard"
-__wait_for_management "http://127.0.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT/api/accounts"
+__wait_for_http "http://172.17.0.1:$NB_KC_MGMT_PORT/health/ready" "Keycloak"
+__wait_for_http "http://172.17.0.1:$NB_DASHBOARD_BACKEND_PORT/" "NetBird dashboard"
+__wait_for_management "http://172.17.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT/api/accounts"
 
 # Auto-configure Keycloak OIDC on first install (no-op on reruns)
 __auto_configure_oidc
@@ -1733,10 +1733,10 @@ Host integration:
   - SELinux bind relabeling: $(if __selinux_enabled; then printf 'enabled'; else printf 'not required'; fi)
 
 Local reverse-proxy backends:
-  - Dashboard root                          -> http://127.0.0.1:$NB_DASHBOARD_BACKEND_PORT
-  - Management REST / websocket proxy       -> http://127.0.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT
-  - Keycloak OIDC / UI                      -> http://127.0.0.1:$NB_KC_BACKEND_PORT
-  - Signal                                  -> http://127.0.0.1:$NB_SIGNAL_BACKEND_PORT
+  - Dashboard root                          -> http://172.17.0.1:$NB_DASHBOARD_BACKEND_PORT
+  - Management REST / websocket proxy       -> http://172.17.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT
+  - Keycloak OIDC / UI                      -> http://172.17.0.1:$NB_KC_BACKEND_PORT
+  - Signal                                  -> http://172.17.0.1:$NB_SIGNAL_BACKEND_PORT
   - TURN                                    -> udp/$NB_TURN_PORT and udp/$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT
 
 Keycloak admin (configuration only):
