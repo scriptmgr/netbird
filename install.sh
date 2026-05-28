@@ -103,7 +103,7 @@ __spin_start() {
         _i=0
         while true; do
             case $((_i % 4)) in
-            0) _c='-' ;; 1) _c='\\' ;; 2) _c='|' ;; *) _c='/' ;;
+            0) _c='-' ;; 1) _c='\' ;; 2) _c='|' ;; *) _c='/' ;;
             esac
             printf '\r  [ %s ] %s' "$_c" "$_SPIN_MSG" >&9
             sleep 0.1
@@ -116,8 +116,8 @@ __spin_start() {
 __spin_end() {
     _se_sym="$1"
     if [ -n "$_SPIN_PID" ]; then
-        kill "$_SPIN_PID" 2>/dev/null
-        wait "$_SPIN_PID" 2>/dev/null
+        kill "$_SPIN_PID" 2>/dev/null || true
+        wait "$_SPIN_PID" 2>/dev/null || true
         _SPIN_PID=""
     fi
     printf '\r  [ %s ] %-60s\n' "$_se_sym" "$_SPIN_MSG" >&9
@@ -128,8 +128,8 @@ __spin_fail()  { __spin_end '!!'; }
 __spin_warn()  { __spin_end ' !'; }
 __spin_clear() {
     if [ -n "$_SPIN_PID" ]; then
-        kill "$_SPIN_PID" 2>/dev/null
-        wait "$_SPIN_PID" 2>/dev/null
+        kill "$_SPIN_PID" 2>/dev/null || true
+        wait "$_SPIN_PID" 2>/dev/null || true
         _SPIN_PID=""
         printf '\r%80s\r' '' >&9
     fi
