@@ -30,11 +30,14 @@ SCRIPT_SRC_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 
 set -eu
 
-# fd 9 = direct terminal output; bypasses stdout redirection inside __step
+# fd 9 = direct terminal output; bypasses stdout redirection inside __step.
+# Use stdout when running interactively, stderr otherwise (e.g. curl|sh,
+# ssh host 'sh script').  Never try /dev/tty — exec is a special built-in
+# and a failed redirect exits the shell even inside an OR list.
 if [ -t 1 ]; then
     exec 9>&1
 else
-    exec 9>/dev/tty 2>/dev/null || exec 9>&2
+    exec 9>&2
 fi
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
