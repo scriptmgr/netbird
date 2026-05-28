@@ -879,10 +879,11 @@ services:
       - $KC_DB_DATA:/var/lib/postgresql/data:$rw_opts
     networks: [$NB_DOCKER_NETWORK]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \$\$POSTGRES_USER -d \$\$POSTGRES_DB"]
+      test: ["CMD", "pg_isready"]
       interval: 10s
       timeout: 5s
-      retries: 12
+      retries: 18
+      start_period: 30s
     logging:
       driver: json-file
       options:
@@ -1210,7 +1211,7 @@ __ensure_admin_user() {
 		--data-urlencode "username=admin" \
 		--data-urlencode "password=$kc_admin_pass" \
 		"$kc_url/realms/master/protocol/openid-connect/token" \
-		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""), end="")')
+		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""), end="")') || true
 
 	if [ -z "$_ea_token" ]; then
 		__warn "could not obtain Keycloak admin token — skipping admin user creation"
@@ -1222,7 +1223,7 @@ __ensure_admin_user() {
 	_ea_existing=$(curl -s \
 		-H "Authorization: Bearer $_ea_token" \
 		"$kc_url/admin/realms/$NB_ORG/users?username=admin" \
-		| python3 -c 'import sys,json; u=json.load(sys.stdin); print(u[0]["id"] if u else "", end="")')
+		| python3 -c 'import sys,json; u=json.load(sys.stdin); print(u[0]["id"] if u else "", end="")') || true
 
 	if [ -n "$_ea_existing" ]; then
 		__say "Keycloak: realm admin user already exists — skipping creation"
@@ -1239,7 +1240,7 @@ __ensure_admin_user() {
 		_ea_uuid=$(curl -s \
 			-H "Authorization: Bearer $_ea_token" \
 			"$kc_url/admin/realms/$NB_ORG/users?username=admin" \
-			| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
+			| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")') || true
 		[ -n "$_ea_uuid" ] || __die "Admin user created but UUID not found"
 
 		curl -sSf -X PUT \
@@ -1263,7 +1264,7 @@ __ensure_admin_user() {
 	_ea_nb_existing=$(curl -s \
 		-H "Authorization: Bearer $_ea_token" \
 		"$kc_url/admin/realms/$NB_ORG/users?username=$NB_ADMIN_USER" \
-		| python3 -c 'import sys,json; u=json.load(sys.stdin); print(u[0]["id"] if u else "", end="")')
+		| python3 -c 'import sys,json; u=json.load(sys.stdin); print(u[0]["id"] if u else "", end="")') || true
 
 	if [ -n "$_ea_nb_existing" ]; then
 		__say "Keycloak: $NB_ADMIN_USER already exists — skipping creation"
@@ -1279,7 +1280,7 @@ __ensure_admin_user() {
 		_ea_nb_uuid=$(curl -s \
 			-H "Authorization: Bearer $_ea_token" \
 			"$kc_url/admin/realms/$NB_ORG/users?username=$NB_ADMIN_USER" \
-			| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
+			| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")') || true
 		[ -n "$_ea_nb_uuid" ] || __die "$NB_ADMIN_USER created but UUID not found"
 
 		curl -sSf -X PUT \
@@ -1296,11 +1297,11 @@ __ensure_admin_user() {
 	_ea_rm_uuid=$(curl -s \
 		-H "Authorization: Bearer $_ea_token" \
 		"$kc_url/admin/realms/$NB_ORG/clients?clientId=realm-management" \
-		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "", end="")')
+		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "", end="")') || true
 	if [ -n "$_ea_rm_uuid" ]; then
 		_ea_ra_role=$(curl -s \
 			-H "Authorization: Bearer $_ea_token" \
-			"$kc_url/admin/realms/$NB_ORG/clients/$_ea_rm_uuid/roles/realm-admin")
+			"$kc_url/admin/realms/$NB_ORG/clients/$_ea_rm_uuid/roles/realm-admin") || true
 		if printf '%s' "$_ea_ra_role" | python3 -c 'import sys,json; json.load(sys.stdin)' >/dev/null 2>&1; then
 			curl -sSf -X POST \
 				-H "Authorization: Bearer $_ea_token" \
@@ -1341,7 +1342,7 @@ __auto_configure_oidc() {
 		--data-urlencode "password=$kc_admin_pass" \
 		"$kc_url/realms/master/protocol/openid-connect/token") \
 		|| __die "OIDC setup: failed to obtain Keycloak admin token"
-	admin_token=$(printf '%s' "$token_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"], end="")')
+	admin_token=$(printf '%s' "$token_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"], end="")') || true
 	[ -n "$admin_token" ] || __die "OIDC setup: empty admin token"
 	__say "  Keycloak admin token obtained"
 
@@ -1375,7 +1376,7 @@ __auto_configure_oidc() {
 	nb_client_uuid=$(curl -sSf \
 		-H "Authorization: Bearer $admin_token" \
 		"$kc_url/admin/realms/$NB_ORG/clients?clientId=netbird-client" \
-		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
+		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")') || true
 	[ -n "$nb_client_uuid" ] || __die "OIDC setup: could not find netbird-client UUID"
 
 	# Ensure redirect URIs include the domain even when the client already existed
@@ -1413,13 +1414,13 @@ __auto_configure_oidc() {
 	mgmt_uuid=$(curl -sSf \
 		-H "Authorization: Bearer $admin_token" \
 		"$kc_url/admin/realms/$NB_ORG/clients?clientId=netbird-management" \
-		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
+		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")') || true
 	[ -n "$mgmt_uuid" ] || __die "OIDC setup: could not find netbird-management UUID"
 
 	secret_resp=$(curl -sSf -X POST \
 		-H "Authorization: Bearer $admin_token" \
 		"$kc_url/admin/realms/$NB_ORG/clients/$mgmt_uuid/client-secret")
-	mgmt_secret=$(printf '%s' "$secret_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"], end="")')
+	mgmt_secret=$(printf '%s' "$secret_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"], end="")') || true
 	[ -n "$mgmt_secret" ] || __die "OIDC setup: could not obtain management client secret"
 	__say "  Management client secret generated"
 
@@ -1430,18 +1431,18 @@ __auto_configure_oidc() {
 	sa_user_id=$(curl -sSf \
 		-H "Authorization: Bearer $admin_token" \
 		"$kc_url/admin/realms/$NB_ORG/clients/$mgmt_uuid/service-account-user" \
-		| python3 -c 'import sys,json; print(json.load(sys.stdin)["id"], end="")')
+		| python3 -c 'import sys,json; print(json.load(sys.stdin)["id"], end="")') || true
 	[ -n "$sa_user_id" ] || __die "OIDC setup: could not find service account user ID"
 
 	rm_uuid=$(curl -sSf \
 		-H "Authorization: Bearer $admin_token" \
 		"$kc_url/admin/realms/$NB_ORG/clients?clientId=realm-management" \
-		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
+		| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")') || true
 	[ -n "$rm_uuid" ] || __die "OIDC setup: could not find realm-management client UUID"
 
 	realm_admin_role=$(curl -sSf \
 		-H "Authorization: Bearer $admin_token" \
-		"$kc_url/admin/realms/$NB_ORG/clients/$rm_uuid/roles/realm-admin")
+		"$kc_url/admin/realms/$NB_ORG/clients/$rm_uuid/roles/realm-admin") || true
 	[ -n "$realm_admin_role" ] || __die "OIDC setup: could not fetch realm-admin role"
 
 	curl -sSf -X POST \
@@ -1493,7 +1494,7 @@ __configure_netbird_defaults() {
 		--data-urlencode "username=admin" \
 		--data-urlencode "password=$kc_admin_pass" \
 		"$kc_url/realms/master/protocol/openid-connect/token" \
-		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""), end="")')
+		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""), end="")') || true
 
 	if [ -z "$_nd_admin_token" ]; then
 		__warn "could not obtain Keycloak admin token — skipping NetBird defaults configuration"
@@ -1504,7 +1505,7 @@ __configure_netbird_defaults() {
 	_nd_nb_client_uuid=$(curl -s \
 		-H "Authorization: Bearer $_nd_admin_token" \
 		"$kc_url/admin/realms/$NB_ORG/clients?clientId=netbird-client" \
-		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "", end="")')
+		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "", end="")') || true
 
 	if [ -z "$_nd_nb_client_uuid" ]; then
 		__warn "netbird-client not found in Keycloak — skipping NetBird defaults"
@@ -1527,14 +1528,14 @@ __configure_netbird_defaults() {
 		--data-urlencode "password=$kc_admin_pass" \
 		--data-urlencode "scope=openid profile email offline_access" \
 		"$kc_url/realms/$NB_ORG/protocol/openid-connect/token" \
-		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""), end="")')
+		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""), end="")') || true
 
 	# Disable direct access grants again regardless of outcome
 	curl -s -X PUT \
 		-H "Authorization: Bearer $_nd_admin_token" \
 		-H "Content-Type: application/json" \
 		-d "{\"clientId\":\"netbird-client\",\"enabled\":true,\"publicClient\":true,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,\"redirectUris\":[\"http://localhost:53000/*\",\"http://localhost:54000/*\",\"https://$NB_DOMAIN/*\"],\"webOrigins\":[\"+\"]}" \
-		"$kc_url/admin/realms/$NB_ORG/clients/$_nd_nb_client_uuid" >/dev/null
+		"$kc_url/admin/realms/$NB_ORG/clients/$_nd_nb_client_uuid" >/dev/null || true
 
 	if [ -z "$_nd_user_token" ]; then
 		__warn "could not obtain NetBird admin user token — skipping NetBird defaults"
@@ -1546,7 +1547,7 @@ __configure_netbird_defaults() {
 	_nd_account_id=$(curl -s \
 		-H "Authorization: Bearer $_nd_user_token" \
 		"$nb_url/api/accounts" \
-		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "", end="")')
+		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "", end="")') || true
 
 	if [ -z "$_nd_account_id" ]; then
 		__warn "could not fetch NetBird account ID — skipping defaults"
@@ -1557,7 +1558,7 @@ __configure_netbird_defaults() {
 	# Update account DNS domain to NB_DOMAIN if the API exposes it
 	_nd_acct_resp=$(curl -s \
 		-H "Authorization: Bearer $_nd_user_token" \
-		"$nb_url/api/accounts/$_nd_account_id")
+		"$nb_url/api/accounts/$_nd_account_id") || true
 	_nd_current_domain=$(printf '%s' "$_nd_acct_resp" \
 		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("domain",""), end="")' 2>/dev/null || true)
 	if [ -n "$_nd_current_domain" ] && [ "$_nd_current_domain" != "$NB_DOMAIN" ]; then
@@ -1580,7 +1581,7 @@ __configure_netbird_defaults() {
 	_nd_existing_key=$(curl -s \
 		-H "Authorization: Bearer $_nd_user_token" \
 		"$nb_url/api/setup-keys" \
-		| python3 -c 'import sys,json; keys=json.load(sys.stdin); print(next((k["id"] for k in keys if k.get("name")=="Default"), ""), end="")')
+		| python3 -c 'import sys,json; keys=json.load(sys.stdin); print(next((k["id"] for k in keys if k.get("name")=="Default"), ""), end="")') || true
 	if [ -n "$_nd_existing_key" ]; then
 		__say "  Setup key 'Default' already exists — skipping"
 	else
@@ -1588,7 +1589,7 @@ __configure_netbird_defaults() {
 			-H "Authorization: Bearer $_nd_user_token" \
 			-H "Content-Type: application/json" \
 			-d '{"name":"Default","type":"reusable","expiry":315360000,"auto_groups":[],"usage_limit":0}' \
-			"$nb_url/api/setup-keys")
+			"$nb_url/api/setup-keys") || true
 		_nd_key=$(printf '%s' "$_nd_key_resp" \
 			| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("key",""), end="")' 2>/dev/null || true)
 		if [ -n "$_nd_key" ]; then
@@ -1605,7 +1606,7 @@ __configure_netbird_defaults() {
 	_nd_nb_admin_id=$(curl -s \
 		-H "Authorization: Bearer $_nd_user_token" \
 		"$nb_url/api/users" \
-		| python3 -c "import sys,json; users=json.load(sys.stdin); print(next((u['id'] for u in users if u.get('email','').lower()=='$NB_ADMIN_EMAIL'.lower()), ''), end='')")
+		| python3 -c "import sys,json; users=json.load(sys.stdin); print(next((u['id'] for u in users if u.get('email','').lower()=='$NB_ADMIN_EMAIL'.lower()), ''), end='')") || true
 	if [ -n "$_nd_nb_admin_id" ]; then
 		curl -s -X PUT \
 			-H "Authorization: Bearer $_nd_user_token" \
@@ -1747,7 +1748,19 @@ __docker_pull() {
 __docker_up() {
     cd "$NB_COMPOSE" || return 1
     set -a; . "$KC_ENV_FILE"; . "$NETBIRD_ENV_FILE"; set +a
-    docker compose up -d
+    if ! docker compose up -d; then
+        printf '\n  Container logs:\n' >&9
+        docker compose ps --all --format '{{.Name}} {{.State}}' 2>/dev/null \
+            | while IFS= read -r _line; do
+                _cname="${_line%% *}"
+                _cstate="${_line##* }"
+                case "$_cstate" in exited|dead|unhealthy)
+                    printf '\n  --- %s ---\n' "$_cname" >&9
+                    docker logs --tail 30 "$_cname" 2>&1 | sed 's/^/    /' >&9
+                esac
+            done
+        return 1
+    fi
 }
 
 __wait_for_keycloak() {
