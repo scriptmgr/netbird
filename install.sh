@@ -284,7 +284,7 @@ __nb_origin() {
 	*)   printf 'https://%s:%s' "$NB_DOMAIN" "$NB_EXTERNAL_PORT" ;;
 	esac
 }
-: "${NB_EMAIL_SMTP_HOST:=127.0.0.1}"
+: "${NB_EMAIL_SMTP_HOST:=172.17.0.1}"
 : "${NB_EMAIL_SMTP_PORT:=25}"
 : "${NB_EMAIL_FROM_USER:=no-reply@$NB_DOMAIN}"
 : "${NB_TIMEZONE:=America/New_York}"
