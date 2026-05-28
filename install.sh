@@ -46,6 +46,8 @@ case "${1:-}" in
     printf '  NB_TURN_PORT         TURN UDP port (default: 3478)\n'
     printf '  NB_VERSION           NetBird version tag (default: %s)\n' "${NB_VERSION:-0.71.4}"
     printf '  NB_DASHBOARD_VERSION Dashboard version tag (default: %s)\n' "${NB_DASHBOARD_VERSION:-v2.38.1}"
+    printf '  NB_ADMIN_USER        Day-to-day NetBird admin username (default: administrator)\n'
+    printf '  NB_ADMIN_EMAIL       Day-to-day NetBird admin email (default: administrator@{NB_DOMAIN})\n'
     printf '\nSee README.md for full documentation.\n'
     exit 0
     ;;
@@ -305,6 +307,8 @@ __nb_origin() {
 : "${NB_DASHBOARD_VERSION:=v2.38.1}"
 : "${NB_SSL_CERT:=$NB_ROOT/etc/tls/fullchain.pem}"
 : "${NB_SSL_KEY:=$NB_ROOT/etc/tls/privkey.pem}"
+: "${NB_ADMIN_USER:=administrator}"
+: "${NB_ADMIN_EMAIL:=administrator@$NB_DOMAIN}"
 
 NB_ETC="$NB_ROOT/etc"
 NB_DATA="$NB_ROOT/data"
@@ -326,6 +330,7 @@ KC_DB_PASS_FILE="$NB_SECRETS/kc_db_password"
 TURN_PASS_FILE="$NB_SECRETS/turn_password"
 TURN_USER_FILE="$NB_SECRETS/turn_user"
 DATASTORE_KEY_FILE="$NB_SECRETS/netbird_datastore_key"
+NB_ADMIN_PASS_FILE="$NB_SECRETS/nb_admin_password"
 
 KC_ENV_FILE="$NB_ETC/keycloak.env"
 NETBIRD_ENV_FILE="$NB_ETC/netbird.env"
@@ -575,6 +580,7 @@ __ensure_runtime_secrets() {
 	__ensure_secret_file "$KC_ADMIN_PASS_FILE" 24 "Keycloak admin password"
 	__ensure_secret_file "$KC_DB_PASS_FILE" 32 "Keycloak database password"
 	__ensure_secret_file "$TURN_PASS_FILE" 32 "TURN password"
+	__ensure_secret_file "$NB_ADMIN_PASS_FILE" 24 "NetBird admin password"
 	__ensure_datastore_key
 	__ensure_value_file "$TURN_USER_FILE" "$TURN_USER_LOCAL" "TURN username"
 }
@@ -1139,6 +1145,61 @@ __ensure_admin_user() {
 	__say "  URL:      $(__nb_origin)"
 	__say "  Username: admin"
 	__say "  Password: see $KC_ADMIN_PASS_FILE"
+
+	# Create the separate administrator account (NB_ADMIN_USER) with realm-admin role.
+	# This account is for day-to-day NetBird management; admin is reserved for Keycloak config.
+	nb_admin_pass="$(__read_value "$NB_ADMIN_PASS_FILE")"
+	_ea_nb_existing=$(curl -s \
+		-H "Authorization: Bearer $_ea_token" \
+		"$kc_url/admin/realms/$NB_ORG/users?username=$NB_ADMIN_USER" \
+		| python3 -c 'import sys,json; u=json.load(sys.stdin); print(u[0]["id"] if u else "", end="")')
+
+	if [ -n "$_ea_nb_existing" ]; then
+		__say "Keycloak: $NB_ADMIN_USER already exists — skipping creation"
+		_ea_nb_uuid="$_ea_nb_existing"
+	else
+		curl -sSf -X POST \
+			-H "Authorization: Bearer $_ea_token" \
+			-H "Content-Type: application/json" \
+			-d "{\"username\":\"$NB_ADMIN_USER\",\"email\":\"$NB_ADMIN_EMAIL\",\"firstName\":\"Administrator\",\"lastName\":\"NetBird\",\"enabled\":true,\"emailVerified\":true}" \
+			"$kc_url/admin/realms/$NB_ORG/users" >/dev/null \
+			|| __die "Failed to create $NB_ADMIN_USER in Keycloak realm $NB_ORG"
+
+		_ea_nb_uuid=$(curl -s \
+			-H "Authorization: Bearer $_ea_token" \
+			"$kc_url/admin/realms/$NB_ORG/users?username=$NB_ADMIN_USER" \
+			| python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"], end="")')
+		[ -n "$_ea_nb_uuid" ] || __die "$NB_ADMIN_USER created but UUID not found"
+
+		curl -sSf -X PUT \
+			-H "Authorization: Bearer $_ea_token" \
+			-H "Content-Type: application/json" \
+			-d "{\"type\":\"password\",\"value\":\"$nb_admin_pass\",\"temporary\":false}" \
+			"$kc_url/admin/realms/$NB_ORG/users/$_ea_nb_uuid/reset-password" >/dev/null \
+			|| __die "Failed to set $NB_ADMIN_USER password"
+
+		__say "Keycloak: $NB_ADMIN_USER created in realm $NB_ORG"
+	fi
+
+	# Assign realm-admin role to NB_ADMIN_USER so they can manage users in Keycloak.
+	_ea_rm_uuid=$(curl -s \
+		-H "Authorization: Bearer $_ea_token" \
+		"$kc_url/admin/realms/$NB_ORG/clients?clientId=realm-management" \
+		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "", end="")')
+	if [ -n "$_ea_rm_uuid" ]; then
+		_ea_ra_role=$(curl -s \
+			-H "Authorization: Bearer $_ea_token" \
+			"$kc_url/admin/realms/$NB_ORG/clients/$_ea_rm_uuid/roles/realm-admin")
+		if printf '%s' "$_ea_ra_role" | python3 -c 'import sys,json; json.load(sys.stdin)' >/dev/null 2>&1; then
+			curl -sSf -X POST \
+				-H "Authorization: Bearer $_ea_token" \
+				-H "Content-Type: application/json" \
+				-d "[$_ea_ra_role]" \
+				"$kc_url/admin/realms/$NB_ORG/users/$_ea_nb_uuid/role-mappings/clients/$_ea_rm_uuid" >/dev/null \
+				|| __say "  Note: realm-admin may already be assigned to $NB_ADMIN_USER"
+			__say "Keycloak: realm-admin role assigned to $NB_ADMIN_USER"
+		fi
+	fi
 }
 
 # __auto_configure_oidc — uses the Keycloak admin REST API to create the netbird
@@ -1295,6 +1356,161 @@ __auto_configure_oidc() {
 	__say "OIDC auto-configuration complete."
 }
 
+# __configure_netbird_defaults — runs once after OIDC is configured.
+# Uses the Keycloak OIDC token for the admin user to call the NetBird
+# management API and:
+#   1. Create a reusable "Default" setup key (3650-day expiry)
+#   2. Provision NB_ADMIN_USER into NetBird and grant them admin role
+#   3. Set the account DNS domain to NB_DOMAIN
+# Direct access grants are temporarily enabled on netbird-client for
+# the password grant, then disabled again before returning.
+__configure_netbird_defaults() {
+	if [ -f "$NB_STATE/netbird_defaults.done" ]; then
+		return 0
+	fi
+
+	__say "Configuring NetBird defaults (setup key, admin role, DNS domain)..."
+
+	kc_url="http://127.0.0.1:$NB_KC_BACKEND_PORT"
+	nb_url="http://127.0.0.1:$NB_MANAGEMENT_HTTP_BACKEND_PORT"
+	kc_admin_pass="$(__read_value "$KC_ADMIN_PASS_FILE")"
+
+	# Obtain a Keycloak master-realm admin token to manage client config
+	_nd_admin_token=$(curl -s \
+		--data-urlencode "grant_type=password" \
+		--data-urlencode "client_id=admin-cli" \
+		--data-urlencode "username=admin" \
+		--data-urlencode "password=$kc_admin_pass" \
+		"$kc_url/realms/master/protocol/openid-connect/token" \
+		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""), end="")')
+
+	if [ -z "$_nd_admin_token" ]; then
+		__say "WARNING: could not obtain Keycloak admin token — skipping NetBird defaults configuration"
+		return 0
+	fi
+
+	# Find the netbird-client UUID
+	_nd_nb_client_uuid=$(curl -s \
+		-H "Authorization: Bearer $_nd_admin_token" \
+		"$kc_url/admin/realms/$NB_ORG/clients?clientId=netbird-client" \
+		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "", end="")')
+
+	if [ -z "$_nd_nb_client_uuid" ]; then
+		__say "WARNING: netbird-client not found in Keycloak — skipping NetBird defaults"
+		return 0
+	fi
+
+	# Temporarily enable direct access grants so we can obtain a user JWT
+	curl -sSf -X PUT \
+		-H "Authorization: Bearer $_nd_admin_token" \
+		-H "Content-Type: application/json" \
+		-d "{\"clientId\":\"netbird-client\",\"enabled\":true,\"publicClient\":true,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":true,\"redirectUris\":[\"http://localhost:53000/*\",\"http://localhost:54000/*\",\"https://$NB_DOMAIN/*\"],\"webOrigins\":[\"+\"]}" \
+		"$kc_url/admin/realms/$NB_ORG/clients/$_nd_nb_client_uuid" >/dev/null \
+		|| { __say "WARNING: could not enable direct access grants — skipping NetBird defaults"; return 0; }
+
+	# Obtain a JWT for the admin user via resource owner password credentials
+	_nd_user_token=$(curl -s \
+		--data-urlencode "grant_type=password" \
+		--data-urlencode "client_id=netbird-client" \
+		--data-urlencode "username=admin" \
+		--data-urlencode "password=$kc_admin_pass" \
+		--data-urlencode "scope=openid profile email offline_access" \
+		"$kc_url/realms/$NB_ORG/protocol/openid-connect/token" \
+		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""), end="")')
+
+	# Disable direct access grants again regardless of outcome
+	curl -s -X PUT \
+		-H "Authorization: Bearer $_nd_admin_token" \
+		-H "Content-Type: application/json" \
+		-d "{\"clientId\":\"netbird-client\",\"enabled\":true,\"publicClient\":true,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,\"redirectUris\":[\"http://localhost:53000/*\",\"http://localhost:54000/*\",\"https://$NB_DOMAIN/*\"],\"webOrigins\":[\"+\"]}" \
+		"$kc_url/admin/realms/$NB_ORG/clients/$_nd_nb_client_uuid" >/dev/null
+
+	if [ -z "$_nd_user_token" ]; then
+		__say "WARNING: could not obtain NetBird admin user token — skipping NetBird defaults"
+		return 0
+	fi
+	__say "  NetBird admin user token obtained"
+
+	# Fetch account ID (also provisions the admin user as account owner on first call)
+	_nd_account_id=$(curl -s \
+		-H "Authorization: Bearer $_nd_user_token" \
+		"$nb_url/api/accounts" \
+		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "", end="")')
+
+	if [ -z "$_nd_account_id" ]; then
+		__say "WARNING: could not fetch NetBird account ID — skipping defaults"
+		return 0
+	fi
+	__say "  NetBird account ID: $_nd_account_id"
+
+	# Update account DNS domain to NB_DOMAIN if the API exposes it
+	_nd_acct_resp=$(curl -s \
+		-H "Authorization: Bearer $_nd_user_token" \
+		"$nb_url/api/accounts/$_nd_account_id")
+	_nd_current_domain=$(printf '%s' "$_nd_acct_resp" \
+		| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("domain",""), end="")' 2>/dev/null || true)
+	if [ -n "$_nd_current_domain" ] && [ "$_nd_current_domain" != "$NB_DOMAIN" ]; then
+		_nd_settings=$(printf '%s' "$_nd_acct_resp" \
+			| python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin).get("settings",{})), end="")' 2>/dev/null || true)
+		if [ -n "$_nd_settings" ]; then
+			curl -s -X PUT \
+				-H "Authorization: Bearer $_nd_user_token" \
+				-H "Content-Type: application/json" \
+				-d "{\"settings\":$_nd_settings}" \
+				"$nb_url/api/accounts/$_nd_account_id" >/dev/null \
+				|| true
+		fi
+		__say "  Account DNS domain set to $NB_DOMAIN (was: $_nd_current_domain)"
+	else
+		__say "  Account DNS domain: $NB_DOMAIN"
+	fi
+
+	# Create the "Default" reusable setup key with 3650-day expiry (seconds: 315360000)
+	_nd_existing_key=$(curl -s \
+		-H "Authorization: Bearer $_nd_user_token" \
+		"$nb_url/api/setup-keys" \
+		| python3 -c 'import sys,json; keys=json.load(sys.stdin); print(next((k["id"] for k in keys if k.get("name")=="Default"), ""), end="")')
+	if [ -n "$_nd_existing_key" ]; then
+		__say "  Setup key 'Default' already exists — skipping"
+	else
+		_nd_key_resp=$(curl -s -X POST \
+			-H "Authorization: Bearer $_nd_user_token" \
+			-H "Content-Type: application/json" \
+			-d '{"name":"Default","type":"reusable","expiry":315360000,"auto_groups":[],"usage_limit":0}' \
+			"$nb_url/api/setup-keys")
+		_nd_key=$(printf '%s' "$_nd_key_resp" \
+			| python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("key",""), end="")' 2>/dev/null || true)
+		if [ -n "$_nd_key" ]; then
+			__say "  Setup key 'Default' created (3650 days): $_nd_key"
+			printf '%s\n' "$_nd_key" >"$NB_SECRETS/nb_setup_key_default"
+			chmod 600 "$NB_SECRETS/nb_setup_key_default"
+		else
+			__say "WARNING: failed to create setup key 'Default'"
+		fi
+	fi
+
+	# Trigger user sync and grant NB_ADMIN_USER the NetBird admin role.
+	# GET /api/users fetches from Keycloak IDP and provisions any new users into NetBird.
+	_nd_nb_admin_id=$(curl -s \
+		-H "Authorization: Bearer $_nd_user_token" \
+		"$nb_url/api/users" \
+		| python3 -c "import sys,json; users=json.load(sys.stdin); print(next((u['id'] for u in users if u.get('email','').lower()=='$NB_ADMIN_EMAIL'.lower()), ''), end='')")
+	if [ -n "$_nd_nb_admin_id" ]; then
+		curl -s -X PUT \
+			-H "Authorization: Bearer $_nd_user_token" \
+			-H "Content-Type: application/json" \
+			-d "{\"role\":\"admin\",\"auto_groups\":[]}" \
+			"$nb_url/api/users/$_nd_nb_admin_id" >/dev/null \
+			|| __say "  Note: could not set admin role for $NB_ADMIN_USER (may already be set)"
+		__say "  NetBird admin role granted to $NB_ADMIN_USER ($NB_ADMIN_EMAIL)"
+	else
+		__say "  Note: $NB_ADMIN_USER not yet in NetBird user list — they will receive admin role on first login (configure manually if needed)"
+	fi
+
+	touch "$NB_STATE/netbird_defaults.done"
+	__say "NetBird defaults configured."
+}
+
 # __ensure_tls_cert — resolve the TLS certificate to use for nginx.
 # Priority: 1) any existing Let's Encrypt cert that covers NB_DOMAIN
 #           2) NB_SSL_CERT/NB_SSL_KEY if they already exist
@@ -1420,6 +1636,7 @@ fi
 __ensure_tls_cert
 __write_nginx_vhost
 __ensure_admin_user
+__configure_netbird_defaults
 
 cat <<OUT
 
@@ -1439,10 +1656,21 @@ Local reverse-proxy backends:
   - Signal                                  -> http://127.0.0.1:$NB_SIGNAL_BACKEND_PORT
   - TURN                                    -> udp/$NB_TURN_PORT and udp/$NB_TURN_MIN_PORT-$NB_TURN_MAX_PORT
 
-Keycloak admin:
-  - URL:      $(__nb_origin)
+Keycloak admin (configuration only):
+  - URL:      $(__nb_origin)/admin
   - Username: admin
   - Password: see $KC_ADMIN_PASS_FILE
+
+NetBird admin (day-to-day management):
+  - URL:      $(__nb_origin)
+  - Username: $NB_ADMIN_USER
+  - Password: see $NB_ADMIN_PASS_FILE
+
+Setup key:
+  - Name:     Default (reusable, 3650 days)
+  - Key:      see $NB_SECRETS/nb_setup_key_default (created on first install)
+
+Peer DNS domain: $NB_DOMAIN
 
 Important config files:
   - Keycloak env:        $KC_ENV_FILE
