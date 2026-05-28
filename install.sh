@@ -1749,16 +1749,8 @@ __docker_up() {
     cd "$NB_COMPOSE" || return 1
     set -a; . "$KC_ENV_FILE"; . "$NETBIRD_ENV_FILE"; set +a
     if ! docker compose up -d; then
-        printf '\n  Container logs:\n' >&9
-        docker compose ps --all --format '{{.Name}} {{.State}}' 2>/dev/null \
-            | while IFS= read -r _line; do
-                _cname="${_line%% *}"
-                _cstate="${_line##* }"
-                case "$_cstate" in exited|dead|unhealthy)
-                    printf '\n  --- %s ---\n' "$_cname" >&9
-                    docker logs --tail 30 "$_cname" 2>&1 | sed 's/^/    /' >&9
-                esac
-            done
+        printf '\n  Service logs (last 40 lines each):\n' >&9
+        docker compose logs --no-color --tail 40 2>&1 | sed 's/^/    /' >&9
         return 1
     fi
 }
